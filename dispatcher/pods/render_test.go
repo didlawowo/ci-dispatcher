@@ -417,7 +417,7 @@ func TestCacheProfileLocal(t *testing.T) {
 	if !ok {
 		t.Fatalf("dépôt demo absent du catalogue")
 	}
-	repo.Override.CacheProfile = catalog.CacheProfileLocal
+	repo.CacheProfile = catalog.CacheProfileLocal
 
 	queues := resolveQueues(t, cat)
 	q := findQueue(t, queues, "runner-demo")

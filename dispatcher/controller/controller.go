@@ -447,12 +447,15 @@ func (c *Controller) provision(ctx context.Context, qs *queueState, node string)
 			allowed = []string{node}
 		}
 		if p, ok := c.warm.Take(c.cfg.Pods.Managed(), q.Profile, allowed, c.cfg.Now()); ok {
+			// The reservation is kept on success: the pod cache may still show
+			// the pod as warm until the label patch arrives, and another queue
+			// must not take it meanwhile. OnPod releases it on deletion.
 			err := c.assignWarm(ctx, q, id, p)
-			c.warm.Release(p.Name)
 			if err == nil {
 				c.kick() // refill the reserve
 				return
 			}
+			c.warm.Release(p.Name)
 			c.log.Warn("warm assignment failed, creating a cold pod", "queue", q.Name, "pod", p.Name, "error", err)
 		}
 	}

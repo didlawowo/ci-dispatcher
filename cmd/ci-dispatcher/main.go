@@ -46,6 +46,7 @@ import (
 type options struct {
 	catalog        string
 	kubeconfig     string
+	kubeContext    string
 	claimAddr      string
 	metricsAddr    string
 	tokenFile      string
@@ -68,6 +69,7 @@ func main() {
 	var o options
 	fs.StringVar(&o.catalog, "catalog", "/etc/ci-dispatcher/catalog.yaml", "catalog file")
 	fs.StringVar(&o.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig (empty: in-cluster)")
+	fs.StringVar(&o.kubeContext, "kube-context", "", "kubeconfig context (default: current context)")
 	fs.StringVar(&o.claimAddr, "claim-addr", ":8081", "claim service listen address")
 	fs.StringVar(&o.metricsAddr, "metrics-addr", ":8080", "metrics and health listen address")
 	fs.StringVar(&o.tokenFile, "github-token-file", envOr("CI_DISPATCHER_GITHUB_TOKEN_FILE", ""), "file holding the GitHub PAT (auth type pat)")
@@ -167,8 +169,12 @@ func kubeClient(o options) (kubernetes.Interface, error) {
 		cfg *rest.Config
 		err error
 	)
-	if o.kubeconfig != "" {
-		cfg, err = clientcmd.BuildConfigFromFlags("", o.kubeconfig)
+	if o.kubeconfig != "" || o.kubeContext != "" {
+		rules := clientcmd.NewDefaultClientConfigLoadingRules()
+		if o.kubeconfig != "" {
+			rules.ExplicitPath = o.kubeconfig
+		}
+		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: o.kubeContext}).ClientConfig()
 	} else {
 		cfg, err = rest.InClusterConfig()
 	}

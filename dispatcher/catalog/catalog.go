@@ -594,7 +594,7 @@ func (r *Repo) repoName(key string) string {
 }
 
 // applyNodes merges an override into a node list. An override whose entries
-// all start with "+" adds nodes ("+phoenix"); a plain list replaces; mixing
+// all start with "+" adds nodes ("+node-c"); a plain list replaces; mixing
 // both is an error.
 func applyNodes(base, override []string) ([]string, bool, error) {
 	if len(override) == 0 {

@@ -22,6 +22,8 @@ env:
 jobs:
   basic-e2e:
     name: Basic E2E
+    # Upstream jobs run on GitHub-hosted runners: only in actions/scaleset.
+    if: github.repository == 'actions/scaleset'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

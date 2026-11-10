@@ -43,8 +43,11 @@ jobs:
         run: go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run ./dispatcher/... ./cmd/...
       - name: tests (dispatcher and upstream library)
         run: go test -race ./...
+      # Shipped packages only: the upstream example examples/dockerscaleset
+      # pulls github.com/docker/docker, whose advisories have no fix and do
+      # not reach the image.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
+        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" . ./listener/... ./dispatcher/... ./cmd/...
 
   chart:
     runs-on: arc-runner-ci-dispatcher
@@ -69,7 +72,7 @@ jobs:
       - name: gitleaks
         run: |
           curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp gitleaks
-          /tmp/gitleaks git --redact --no-banner --exit-code 1 .
+          /tmp/gitleaks git --redact --no-banner --config .gitleaks.toml --exit-code 1 .
 
   image:
     needs: [go, chart]

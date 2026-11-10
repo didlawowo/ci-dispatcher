@@ -17,6 +17,8 @@ concurrency:
 
 jobs:
   fmt:
+    # Upstream jobs run on GitHub-hosted runners: only in actions/scaleset.
+    if: github.repository == 'actions/scaleset'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -30,6 +32,8 @@ jobs:
         run: git diff --exit-code
 
   mocks:
+    # Upstream jobs run on GitHub-hosted runners: only in actions/scaleset.
+    if: github.repository == 'actions/scaleset'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -43,6 +47,8 @@ jobs:
         run: git diff --exit-code
 
   lint:
+    # Upstream jobs run on GitHub-hosted runners: only in actions/scaleset.
+    if: github.repository == 'actions/scaleset'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -54,6 +60,8 @@ jobs:
         run: go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run ./...
 
   test:
+    # Upstream jobs run on GitHub-hosted runners: only in actions/scaleset.
+    if: github.repository == 'actions/scaleset'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -341,36 +341,52 @@ func (c *Controller) Reconcile(ctx context.Context) {
 
 	// Assign already-running warm pods before charging the budget for new
 	// pods. They already occupy a place, including when the node is full.
-	for i := range demands {
-		d := &demands[i]
-		c.mu.Lock()
-		qs := c.queues[d.Queue]
-		q, id, warmOK := qs.q, qs.scaleSetID, qs.warmOK
-		c.mu.Unlock()
-		if !warmOK {
-			continue
+	slices.SortStableFunc(demands, func(a, b budget.Demand) int {
+		if a.Priority == "high" && b.Priority != "high" {
+			return -1
 		}
-		for d.Missing > 0 {
-			pod, ok := c.warm.Take(managed, q.Profile, q.Spec.Nodes, now)
-			if !ok {
-				break
+		if a.Priority != "high" && b.Priority == "high" {
+			return 1
+		}
+		return 0
+	})
+	for progress := true; progress; {
+		progress = false
+		for i := range demands {
+			d := &demands[i]
+			if d.Missing == 0 {
+				continue
 			}
-			d.Missing--
 			c.mu.Lock()
-			qs.inflight++
+			qs := c.queues[d.Queue]
+			q, id, warmOK := qs.q, qs.scaleSetID, qs.warmOK
 			c.mu.Unlock()
-			c.start(ctx, func() {
-				defer func() {
-					c.mu.Lock()
-					qs.inflight--
-					c.mu.Unlock()
-					c.kick()
-				}()
-				if err := c.assignWarm(ctx, q, id, pod); err != nil {
-					c.warm.Release(pod.Name)
-					c.log.Warn("warm assignment failed", "queue", q.Name, "pod", pod.Name, "error", err)
+			if !warmOK {
+				continue
+			}
+			{
+				pod, ok := c.warm.Take(managed, q.Profile, q.Spec.Nodes, now)
+				if !ok {
+					continue
 				}
-			})
+				progress = true
+				d.Missing--
+				c.mu.Lock()
+				qs.inflight++
+				c.mu.Unlock()
+				c.start(ctx, func() {
+					defer func() {
+						c.mu.Lock()
+						qs.inflight--
+						c.mu.Unlock()
+						c.kick()
+					}()
+					if err := c.assignWarm(ctx, q, id, pod); err != nil {
+						c.warm.Release(pod.Name)
+						c.log.Warn("warm assignment failed", "queue", q.Name, "pod", pod.Name, "error", err)
+					}
+				})
+			}
 		}
 	}
 

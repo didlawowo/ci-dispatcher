@@ -68,21 +68,21 @@ func install(dst string) error {
 	}
 	defer in.Close()
 	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) // #nosec G302,G304 -- executable copy of the agent binary, dst is the init container shared volume
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) // #nosec G302,G304,G703 -- executable copy of the agent binary, dst is the init container shared volume
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close() // best effort: the copy error is the one that matters
 		return err
 	}
 	if err := out.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o755); err != nil { // #nosec G302 -- the runner binary must stay executable
+	if err := os.Chmod(tmp, 0o755); err != nil { // #nosec G302,G703 -- the runner binary must stay executable
 		return err
 	}
-	return os.Rename(tmp, dst)
+	return os.Rename(tmp, dst) // #nosec G703 -- dst is the init container shared volume, not user input
 }
 
 type agent struct {
@@ -110,7 +110,7 @@ func (a *agent) do(ctx context.Context, method, path string) (*http.Response, er
 // claim returns the payload, nil when the poll timed out.
 func (a *agent) claim(ctx context.Context) (*claim.Payload, error) {
 	if resp, err := a.do(ctx, http.MethodPost, "/v1/ready"); err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	resp, err := a.do(ctx, http.MethodGet, "/v1/claim?wait=50s")
 	if err != nil {
@@ -232,7 +232,7 @@ func runRunner(log *slog.Logger, p *claim.Payload, stateDir string) int {
 	if command == "" {
 		command = "/home/runner/run.sh"
 	}
-	cmd := exec.Command(command) // #nosec G204 -- command is RUNNER_CMD (chart-controlled) or the image's run.sh, by contract of the runner image
+	cmd := exec.Command(command) // #nosec G204,G702 -- command is RUNNER_CMD (chart-controlled) or the image's run.sh, by contract of the runner image
 	cmd.Env = runnerEnv(p)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	defer cleanState(log, stateDir)
@@ -284,7 +284,7 @@ func cleanState(log *slog.Logger, dir string) {
 		}
 		var errs []error
 		for _, e := range entries {
-			errs = append(errs, os.RemoveAll(filepath.Join(dir, e.Name())))
+			errs = append(errs, os.RemoveAll(filepath.Join(dir, e.Name()))) // #nosec G703 -- dir is the runner state dir derived from POD_UID, not user input
 		}
 		done <- errors.Join(errs...)
 	}()

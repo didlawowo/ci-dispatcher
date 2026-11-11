@@ -352,9 +352,10 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	})
 	for progress := true; progress; {
 		progress = false
+		served := map[string]bool{}
 		for i := range demands {
 			d := &demands[i]
-			if d.Missing == 0 {
+			if d.Missing == 0 || served[d.Repo] {
 				continue
 			}
 			c.mu.Lock()
@@ -370,6 +371,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 					continue
 				}
 				progress = true
+				served[d.Repo] = true
 				d.Missing--
 				c.mu.Lock()
 				qs.inflight++

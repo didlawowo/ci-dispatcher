@@ -35,9 +35,9 @@ const (
 	StateWarm           = "warm"
 	StateAssigned       = "assigned"
 	StateBusy           = "busy"
-	TokenAudience       = "ci-dispatcher"
-	TokenMountPath      = "/var/run/secrets/ci-dispatcher"
-	TokenFile           = TokenMountPath + "/token"
+	ClaimAudience       = "ci-dispatcher" // Kubernetes token audience name, not a credential
+	AudienceMountDir      = "/var/run/secrets/ci-dispatcher"
+	AudienceJWTFile           = AudienceMountDir + "/token"
 	AgentBinDir         = "/agent-bin"
 	AgentBinary         = AgentBinDir + "/ci-runner-agent"
 	RunnerContainer     = "runner"
@@ -296,7 +296,7 @@ func applyInvariants(pod *corev1.Pod, req Request) error {
 		corev1.Volume{Name: "ci-dispatcher-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
 			DefaultMode: ptr(int32(0o444)),
 			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-				Audience:          TokenAudience,
+				Audience:          ClaimAudience,
 				ExpirationSeconds: ptr(tokenExpirationSecs),
 				Path:              "token",
 			}}},
@@ -307,7 +307,7 @@ func applyInvariants(pod *corev1.Pod, req Request) error {
 	c.Args = []string{"run"}
 	c.VolumeMounts = append(c.VolumeMounts,
 		corev1.VolumeMount{Name: "agent-bin", MountPath: AgentBinDir, ReadOnly: true},
-		corev1.VolumeMount{Name: "ci-dispatcher-token", MountPath: TokenMountPath, ReadOnly: true},
+		corev1.VolumeMount{Name: "ci-dispatcher-token", MountPath: AudienceMountDir, ReadOnly: true},
 	)
 	stateDir := ""
 	for _, m := range c.VolumeMounts {
@@ -317,7 +317,7 @@ func applyInvariants(pod *corev1.Pod, req Request) error {
 	}
 	c.Env = append(c.Env,
 		corev1.EnvVar{Name: "CI_DISPATCHER_CLAIM_URL", Value: req.ClaimURL},
-		corev1.EnvVar{Name: "CI_DISPATCHER_TOKEN_FILE", Value: TokenFile},
+		corev1.EnvVar{Name: "CI_DISPATCHER_TOKEN_FILE", Value: AudienceJWTFile},
 		corev1.EnvVar{Name: "CI_DISPATCHER_STATE_DIR", Value: stateDir},
 	)
 	for _, v := range pod.Spec.Volumes {

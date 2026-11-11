@@ -159,7 +159,7 @@ func newGitHub(o options, c *catalog.Catalog, log *slog.Logger, m *metrics.Metri
 	case "app":
 		cfg.Credentials = gh.Credentials{AppClientID: c.GitHub.Auth.AppClientID, InstallationID: c.GitHub.Auth.InstallationID, PrivateKeyFile: o.appKeyFile}
 	default:
-		cfg.Credentials = gh.Credentials{TokenFile: o.tokenFile}
+		cfg.Credentials = gh.Credentials{AudienceJWTFile: o.tokenFile}
 	}
 	return gh.New(cfg)
 }
@@ -429,7 +429,7 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 	var ctrl *controller.Controller
 	claims := claim.New(claim.Config{
 		Namespace: c.Runtime.Namespace,
-		Reviewer:  claim.TokenReviewer{Client: kube, Audience: pods.TokenAudience},
+		Reviewer:  claim.TokenReviewer{Client: kube, Audience: pods.ClaimAudience},
 		Lookup:    mgr.Get,
 		Managed:   func(p *corev1.Pod) bool { return p.Labels[pods.LabelManagedBy] == pods.ManagedByValue },
 		Logger:    log.With("component", "claim"),

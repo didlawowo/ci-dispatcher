@@ -156,7 +156,7 @@ func tokenVolume(pod *corev1.Pod) *corev1.Volume {
 			continue
 		}
 		for _, s := range v.Projected.Sources {
-			if s.ServiceAccountToken != nil && s.ServiceAccountToken.Audience == TokenAudience {
+			if s.ServiceAccountToken != nil && s.ServiceAccountToken.Audience == ClaimAudience {
 				return v
 			}
 		}
@@ -294,7 +294,7 @@ func TestInvariantsDeBase(t *testing.T) {
 
 	tv := tokenVolume(pod)
 	if tv == nil {
-		t.Fatalf("aucun volume projeté portant un jeton d'audience %q", TokenAudience)
+		t.Fatalf("aucun volume projeté portant un jeton d'audience %q", ClaimAudience)
 	}
 	if len(tv.Projected.Sources) == 0 {
 		t.Fatalf("le volume projeté %q n'a aucune source", tv.Name)
@@ -303,8 +303,8 @@ func TestInvariantsDeBase(t *testing.T) {
 	if token == nil {
 		t.Fatalf("le volume projeté %q ne contient pas de jeton de compte de service", tv.Name)
 	}
-	if token.Audience != TokenAudience {
-		t.Fatalf("audience du jeton = %q, attendu %q", token.Audience, TokenAudience)
+	if token.Audience != ClaimAudience {
+		t.Fatalf("audience du jeton = %q, attendu %q", token.Audience, ClaimAudience)
 	}
 
 	runner := containerByName(pod, RunnerContainer)
@@ -315,8 +315,8 @@ func TestInvariantsDeBase(t *testing.T) {
 	if mount == nil {
 		t.Fatalf("le conteneur %q ne monte pas le volume %q", RunnerContainer, tv.Name)
 	}
-	if mount.MountPath != TokenMountPath {
-		t.Fatalf("montage du jeton = %q, attendu %q", mount.MountPath, TokenMountPath)
+	if mount.MountPath != AudienceMountDir {
+		t.Fatalf("montage du jeton = %q, attendu %q", mount.MountPath, AudienceMountDir)
 	}
 	if !mount.ReadOnly {
 		t.Fatalf("montage du jeton n'est pas en lecture seule")

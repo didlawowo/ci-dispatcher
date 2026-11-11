@@ -20,7 +20,7 @@ env:
   IMAGE: ghcr.io/didlawowo/ci-dispatcher
   CHART_REPO: oci://ghcr.io/didlawowo/charts
   HELM_VERSION: v3.19.2
-  GOVULNCHECK_VERSION: v1.1.4
+  GOVULNCHECK_VERSION: v1.9.0
   GITLEAKS_VERSION: 8.30.0
 
 jobs:

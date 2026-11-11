@@ -62,13 +62,13 @@ func install(dst string) error {
 	if err != nil {
 		return err
 	}
-	in, err := os.Open(self)
+	in, err := os.Open(self) // #nosec G304 -- the agent copies its own binary from the init container
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) // #nosec G302,G304 -- executable copy of the agent binary, dst is the init container shared volume
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func install(dst string) error {
 	if err := out.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o755); err != nil {
+	if err := os.Chmod(tmp, 0o755); err != nil { // #nosec G302 -- the runner binary must stay executable
 		return err
 	}
 	return os.Rename(tmp, dst)
@@ -192,7 +192,7 @@ func run(log *slog.Logger) int {
 }
 
 func runPreflight(p *claim.Payload) error {
-	cmd := exec.Command("/bin/bash", "-c", preflight.Script)
+	cmd := exec.Command("/bin/bash", "-c", preflight.Script) // #nosec G204 -- script is an embedded constant of the dispatcher image
 	cmd.Env = append(os.Environ(),
 		"CACHE_ROOT="+p.Preflight.Root,
 		"CACHE_SCOPE="+p.Repo,
@@ -232,7 +232,7 @@ func runRunner(log *slog.Logger, p *claim.Payload, stateDir string) int {
 	if command == "" {
 		command = "/home/runner/run.sh"
 	}
-	cmd := exec.Command(command)
+	cmd := exec.Command(command) // #nosec G204 -- command is RUNNER_CMD (chart-controlled) or the image's run.sh, by contract of the runner image
 	cmd.Env = runnerEnv(p)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	defer cleanState(log, stateDir)

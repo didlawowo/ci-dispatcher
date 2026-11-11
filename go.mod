@@ -1,6 +1,6 @@
 module github.com/actions/scaleset
 
-go 1.27.3
+go 1.26.11
 
 require (
 	github.com/docker/docker v28.5.2+incompatible

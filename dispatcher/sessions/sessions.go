@@ -139,7 +139,7 @@ func (p *Pool) backoff(prev time.Duration) time.Duration {
 }
 
 func jitter(d time.Duration) time.Duration {
-	return d + time.Duration(rand.Int64N(int64(d)/5+1))
+	return d + time.Duration(rand.Int64N(int64(d)/5+1)) // #nosec G404 -- retry backoff jitter, not security-sensitive
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {

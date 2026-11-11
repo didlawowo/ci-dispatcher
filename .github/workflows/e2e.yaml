@@ -22,9 +22,9 @@ env:
 jobs:
   basic-e2e:
     name: Basic E2E
-    # Upstream jobs run on GitHub-hosted runners: only in actions/scaleset.
+    # Upstream jobs only run in actions/scaleset; in this fork the label is internal so the trusted policy accepts the file.
     if: github.repository == 'actions/scaleset'
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-ci-dispatcher
     timeout-minutes: 20
     env:
       E2E_WORKFLOW_TARGET_FILE: "basic.yaml"

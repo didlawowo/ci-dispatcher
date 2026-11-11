@@ -87,7 +87,7 @@ func IsJobStillRunning(err error) bool {
 // Credentials are read from files mounted by the chart, never from the
 // catalog. They are re-read when the client is built.
 type Credentials struct {
-	TokenFile      string
+	AudienceJWTFile      string
 	AppClientID    string
 	InstallationID int64
 	PrivateKeyFile string
@@ -144,8 +144,8 @@ func New(cfg Config) (*Client, error) {
 	}
 	c := &Client{cfg: cfg, logger: cfg.Logger, clients: map[string]*scaleset.Client{}}
 	switch {
-	case cfg.Credentials.TokenFile != "":
-		raw, err := os.ReadFile(cfg.Credentials.TokenFile)
+	case cfg.Credentials.AudienceJWTFile != "":
+		raw, err := os.ReadFile(cfg.Credentials.AudienceJWTFile)
 		if err != nil {
 			return nil, fmt.Errorf("read GitHub token: %w", err)
 		}

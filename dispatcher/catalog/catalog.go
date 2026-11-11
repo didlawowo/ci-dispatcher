@@ -275,7 +275,7 @@ var (
 
 // Load reads and validates a catalog file.
 func Load(path string) (*Catalog, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- path given by the operator on the command line or in the Deployment
 	if err != nil {
 		return nil, fmt.Errorf("read catalog: %w", err)
 	}

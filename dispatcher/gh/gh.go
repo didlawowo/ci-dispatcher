@@ -87,10 +87,10 @@ func IsJobStillRunning(err error) bool {
 // Credentials are read from files mounted by the chart, never from the
 // catalog. They are re-read when the client is built.
 type Credentials struct {
-	AudienceJWTFile      string
-	AppClientID    string
-	InstallationID int64
-	PrivateKeyFile string
+	AudienceJWTFile string
+	AppClientID     string
+	InstallationID  int64
+	PrivateKeyFile  string
 }
 
 // Config builds a Client.

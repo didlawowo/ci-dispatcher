@@ -36,8 +36,8 @@ const (
 	StateAssigned       = "assigned"
 	StateBusy           = "busy"
 	ClaimAudience       = "ci-dispatcher" // Kubernetes token audience name, not a credential
-	AudienceMountDir      = "/var/run/secrets/ci-dispatcher"
-	AudienceJWTFile           = AudienceMountDir + "/token"
+	AudienceMountDir    = "/var/run/secrets/ci-dispatcher"
+	AudienceJWTFile     = AudienceMountDir + "/token"
 	AgentBinDir         = "/agent-bin"
 	AgentBinary         = AgentBinDir + "/ci-runner-agent"
 	RunnerContainer     = "runner"

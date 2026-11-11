@@ -289,6 +289,17 @@ func TestResolveSurchargeNodes(t *testing.T) {
 }
 
 func TestResolveDépôtPublic(t *testing.T) {
+	t.Run("GitHub prime sur une visibilité privée périmée", func(t *testing.T) {
+		src := replaceOnce(t, validCatalog(), "  public-repo:\n    profiles: [docker]", "  public-repo:\n    profiles: [docker]\n    visibility: private")
+		c := mustParse(t, src)
+		queues, err := c.Resolve(func(repo string) (bool, error) { return repo == "public-repo", nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q := queueByName(t, queues, "runner-public-repo"); q.Trust != TrustPublic {
+			t.Fatalf("public repository received trust %q", q.Trust)
+		}
+	})
 	t.Run("via fonction Visibility", func(t *testing.T) {
 		c := mustParse(t, validCatalog())
 		visibility := func(repo string) (bool, error) {

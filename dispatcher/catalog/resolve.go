@@ -61,8 +61,7 @@ type NamedCache struct {
 }
 
 // Visibility tells whether a repository is public. It is asked once per
-// repository at startup; nil means every repository is private unless the
-// catalog forces its visibility.
+// repository at startup; nil uses the catalog visibility for offline checks.
 type Visibility func(repo string) (public bool, err error)
 
 // Resolve returns every queue of the catalog, sorted by name. A public
@@ -75,14 +74,14 @@ func (c *Catalog) Resolve(visibility Visibility) ([]Queue, error) {
 		r := c.Repos[key]
 		name := r.repoName(key)
 		switch {
-		case r.Visibility != "":
-			public[name] = r.Visibility == "public"
 		case visibility != nil:
 			p, err := visibility(name)
 			if err != nil {
 				return nil, fmt.Errorf("repo %s: visibility: %w", name, err)
 			}
-			public[name] = p
+			public[name] = p || r.Visibility == "public"
+		default:
+			public[name] = r.Visibility == "public"
 		}
 		if public[name] {
 			pp, ok := c.Profiles[c.Defaults.PublicProfile]

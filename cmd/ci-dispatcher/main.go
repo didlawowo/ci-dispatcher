@@ -185,8 +185,7 @@ func kubeClient(o options) (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(cfg)
 }
 
-// resolve returns the queues, asking GitHub for the visibility of every
-// repository whose visibility the catalog does not force.
+// resolve returns the queues, checking every repository's GitHub visibility.
 func resolve(ctx context.Context, c *catalog.Catalog, api gh.API) ([]catalog.Queue, error) {
 	var vis catalog.Visibility
 	if api != nil {

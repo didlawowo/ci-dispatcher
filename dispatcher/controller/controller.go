@@ -41,9 +41,17 @@ const (
 	lostMailboxMinAge  = 30 * time.Second
 	warmNotReadyMaxAge = 10 * time.Minute
 	scaleDownMinAge    = 2 * time.Minute
-	maxParallelStarts  = 8
-	runnerNamePrefix   = "ci-"
-	warmCacheRoot      = "/mnt/language-cache"
+	// pendingMaxAge bounds how long a created or assigned pod is counted
+	// before the pod cache shows it.
+	pendingMaxAge = 2 * time.Minute
+	// finishRetryAfter spaces the deletions of the same finished pod.
+	finishRetryAfter = 30 * time.Second
+	// warmStartupGrace lets the agents of existing warm pods report ready
+	// again after a dispatcher start before they are judged stale.
+	warmStartupGrace  = warmpool.ReadyTTL + time.Minute
+	maxParallelStarts = 8
+	runnerNamePrefix  = "ci-"
+	warmCacheRoot     = "/mnt/language-cache"
 )
 
 // PodAPI is what the controller needs from the pod manager.
@@ -62,6 +70,8 @@ type Mailbox interface {
 	Pending(pod string) bool
 	Ready(pod string) (time.Time, bool)
 	Forget(pod string)
+	// Delivered reports a configuration already handed to the pod's agent.
+	Delivered(pod string) bool
 }
 
 // Config builds a Controller.
@@ -78,6 +88,18 @@ type Config struct {
 	Logger     *slog.Logger
 	// Now replaces the clock (tests).
 	Now func() time.Time
+}
+
+// pendingPod is a pod created or assigned by the controller that the pod
+// cache does not show yet (or not with its new labels). It is counted so the
+// next reconciliation neither starts a second runner for the same job nor
+// gives its place on the node away.
+type pendingPod struct {
+	queue      string // queue served; empty for a warm pod being created
+	profile    string // warm pod being created
+	node       string // node the pod was pinned to, empty if none
+	scaleSetID int    // >0: seen once the cached pod carries this scale set
+	at         time.Time
 }
 
 type queueState struct {
@@ -97,12 +119,15 @@ type Controller struct {
 	notify  chan struct{}
 	sem     chan struct{}
 
-	mu       sync.Mutex
-	queues   map[string]*queueState
-	byID     map[int]*queueState
-	assigned map[string]time.Time // pod name → assignment time
-	sources  map[string]string    // pod name → warm | cold
-	warmInfl map[string]int       // profile → warm pods being created
+	mu        sync.Mutex
+	queues    map[string]*queueState
+	byID      map[int]*queueState
+	assigned  map[string]time.Time // pod name → assignment time
+	sources   map[string]string    // pod name → warm | cold
+	warmInfl  map[string]int       // profile → warm pods being created
+	pending   map[string]pendingPod
+	finishing map[string]time.Time // finished pod → last deletion attempt
+	started   time.Time
 }
 
 // New builds a Controller.
@@ -114,15 +139,17 @@ func New(cfg Config) *Controller {
 		cfg.Now = time.Now
 	}
 	c := &Controller{
-		cfg:      cfg,
-		log:      cfg.Logger,
-		notify:   make(chan struct{}, 1),
-		sem:      make(chan struct{}, maxParallelStarts),
-		queues:   map[string]*queueState{},
-		byID:     map[int]*queueState{},
-		assigned: map[string]time.Time{},
-		sources:  map[string]string{},
-		warmInfl: map[string]int{},
+		cfg:       cfg,
+		log:       cfg.Logger,
+		notify:    make(chan struct{}, 1),
+		sem:       make(chan struct{}, maxParallelStarts),
+		queues:    map[string]*queueState{},
+		byID:      map[int]*queueState{},
+		assigned:  map[string]time.Time{},
+		sources:   map[string]string{},
+		warmInfl:  map[string]int{},
+		pending:   map[string]pendingPod{},
+		finishing: map[string]time.Time{},
 	}
 	c.warm = warmpool.New(cfg.Labels, cfg.Mailbox.Ready)
 	for _, q := range cfg.Queues {
@@ -238,11 +265,24 @@ func (c *Controller) OnPod(p *corev1.Pod, deleted bool) {
 		c.mu.Lock()
 		delete(c.assigned, p.Name)
 		delete(c.sources, p.Name)
+		delete(c.pending, p.Name)
+		delete(c.finishing, p.Name)
 		c.mu.Unlock()
 		c.kick()
 		return
 	}
 	if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		// Every status update of a finished pod lands here: delete it once,
+		// and again only if it is still there a while later.
+		now := c.cfg.Now()
+		c.mu.Lock()
+		last, busy := c.finishing[p.Name]
+		if busy && now.Sub(last) < finishRetryAfter {
+			c.mu.Unlock()
+			return
+		}
+		c.finishing[p.Name] = now
+		c.mu.Unlock()
 		go c.deletePod(context.Background(), p, "finished")
 	}
 }
@@ -257,11 +297,18 @@ func (c *Controller) OnClaimed(pod, uid string, _ time.Duration) {
 		c.cfg.Metrics.ObserveClaim(p.Labels[c.cfg.Labels.Profile()], source, c.cfg.Now().Sub(at))
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		// The annotation survives a dispatcher restart; until it is set the
+		// mailbox (Delivered) protects the pod from the garbage collector.
 		ann := map[string]string{c.cfg.Labels.ClaimedAnnotation(): c.cfg.Now().UTC().Format(time.RFC3339)}
-		if err := c.cfg.Pods.Patch(ctx, pod, types.UID(uid), nil, ann); err != nil && !pods.IsGone(err) {
+		for attempt, delay := 0, time.Second; attempt < 5; attempt, delay = attempt+1, 2*delay {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := c.cfg.Pods.Patch(ctx, pod, types.UID(uid), nil, ann)
+			cancel()
+			if err == nil || pods.IsGone(err) {
+				return
+			}
 			c.cfg.Metrics.PodErrors.WithLabelValues("patch_claimed").Inc()
+			time.Sleep(delay)
 		}
 	}()
 }
@@ -274,6 +321,9 @@ func (c *Controller) Run(ctx context.Context) {
 	defer gc.Stop()
 	runnerGC := time.NewTicker(runnerGCEvery)
 	defer runnerGC.Stop()
+	c.mu.Lock()
+	c.started = c.cfg.Now()
+	c.mu.Unlock()
 	c.GC(ctx, true)
 	for {
 		c.Reconcile(ctx)
@@ -322,18 +372,20 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	var scaleDown []surplus
 
 	c.mu.Lock()
+	pendQueue, pendWarm := c.pendingCounts(now, usage)
 	for _, qs := range c.queues {
 		if qs.scaleSetID == 0 {
 			continue
 		}
-		active := len(byID[qs.scaleSetID]) + qs.inflight
+		pend := pendQueue[qs.q.Name]
+		active := len(byID[qs.scaleSetID]) + qs.inflight + pend
 		switch {
 		case qs.desired > active:
 			demands = append(demands, budget.Demand{
 				Queue: qs.q.Name, Repo: qs.q.Repo, Profile: qs.q.Profile, Priority: qs.q.Priority,
 				Nodes: preferred(qs.q.Spec), Missing: qs.desired - active,
 			})
-		case qs.desired < active && qs.inflight == 0:
+		case qs.desired < active && qs.inflight == 0 && pend == 0:
 			scaleDown = append(scaleDown, surplus{qs: qs, pods: byID[qs.scaleSetID], n: active - qs.desired})
 		}
 	}
@@ -408,7 +460,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 		c.cfg.Metrics.WarmPods.WithLabelValues(name, "ready").Set(float64(counts.Ready))
 		c.cfg.Metrics.WarmPods.WithLabelValues(name, "starting").Set(float64(counts.Pending))
 		c.mu.Lock()
-		missing := p.Warm - counts.Total() - c.warmInfl[name]
+		missing := p.Warm - counts.Total() - c.warmInfl[name] - pendWarm[name]
 		c.mu.Unlock()
 		if missing > 0 {
 			spec := c.cfg.Catalog.ProfileSpec(name)
@@ -447,6 +499,37 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	for _, s := range scaleDown {
 		c.scaleDown(ctx, s.qs, s.pods, s.n, now)
 	}
+}
+
+// pendingCounts drops the pending pods the cache now shows (or too old) and
+// counts the others per queue and per warm profile. A pending pod pinned to a
+// node and not yet cached is charged on that node. Called with c.mu held.
+func (c *Controller) pendingCounts(now time.Time, usage map[string]int) (map[string]int, map[string]int) {
+	perQueue, perWarm := map[string]int{}, map[string]int{}
+	for name, pp := range c.pending {
+		p, cached := c.cfg.Pods.Get(name)
+		seen := cached && (pp.scaleSetID == 0 || p.Labels[c.cfg.Labels.ScaleSetID()] == strconv.Itoa(pp.scaleSetID))
+		if seen || now.Sub(pp.at) > pendingMaxAge {
+			delete(c.pending, name)
+			continue
+		}
+		if pp.queue != "" {
+			perQueue[pp.queue]++
+		} else {
+			perWarm[pp.profile]++
+		}
+		if !cached && pp.node != "" && usage != nil {
+			usage[pp.node]++
+		}
+	}
+	return perQueue, perWarm
+}
+
+func (c *Controller) addPending(name string, pp pendingPod) {
+	pp.at = c.cfg.Now()
+	c.mu.Lock()
+	c.pending[name] = pp
+	c.mu.Unlock()
 }
 
 // preferred lists the allowed nodes, preferred ones first.
@@ -555,29 +638,38 @@ func (c *Controller) createCold(ctx context.Context, q catalog.Queue, id int, no
 		c.cfg.Metrics.PodErrors.WithLabelValues("render").Inc()
 		return err
 	}
-	jit, err := c.cfg.API.GenerateJIT(ctx, q.Repo, id, name)
-	if err != nil {
-		c.cfg.Metrics.PodErrors.WithLabelValues("jit").Inc()
-		return err
-	}
+	// Registered as assigned before the runner exists on GitHub, so the
+	// runner garbage collector never sees it without a known pod name.
 	now := c.cfg.Now()
-	pod.Annotations[c.cfg.Labels.RunnerIDAnnotation()] = strconv.FormatInt(jit.RunnerID, 10)
-	pod.Annotations[c.cfg.Labels.AssignedAnnotation()] = now.UTC().Format(time.RFC3339)
 	c.mu.Lock()
 	c.assigned[name] = now
 	c.sources[name] = "cold"
 	c.mu.Unlock()
-	created, err := c.cfg.Pods.Create(ctx, pod)
-	if err != nil {
-		c.cfg.Metrics.PodErrors.WithLabelValues("create").Inc()
-		c.removeRunner(q.Repo, jit.RunnerID)
+	forget := func() {
 		c.mu.Lock()
 		delete(c.assigned, name)
 		delete(c.sources, name)
 		c.mu.Unlock()
+	}
+	jit, err := c.cfg.API.GenerateJIT(ctx, q.Repo, id, name)
+	if err != nil {
+		forget()
+		c.cfg.Metrics.PodErrors.WithLabelValues("jit").Inc()
+		return err
+	}
+	pod.Annotations[c.cfg.Labels.RunnerIDAnnotation()] = strconv.FormatInt(jit.RunnerID, 10)
+	pod.Annotations[c.cfg.Labels.AssignedAnnotation()] = now.UTC().Format(time.RFC3339)
+	created, err := c.cfg.Pods.Create(ctx, pod)
+	if err != nil {
+		c.cfg.Metrics.PodErrors.WithLabelValues("create").Inc()
+		c.removeRunner(q.Repo, jit.RunnerID)
+		forget()
 		return fmt.Errorf("create pod %s: %w", name, err)
 	}
+	c.addPending(name, pendingPod{queue: q.Name, node: node})
 	if err := c.cfg.Mailbox.Deposit(name, string(created.UID), claim.Payload{JITConfig: jit.Config, Repo: q.Repo}); err != nil {
+		// The pod was deleted meanwhile: its runner would stay registered.
+		c.removeRunner(q.Repo, jit.RunnerID)
 		return err
 	}
 	c.cfg.Metrics.PodsCreated.WithLabelValues(q.Profile, "cold").Inc()
@@ -607,6 +699,7 @@ func (c *Controller) createWarm(ctx context.Context, profile, node string) {
 		c.log.Warn("warm pod not created", "profile", profile, "error", err)
 		return
 	}
+	c.addPending(name, pendingPod{profile: profile, node: node})
 	c.cfg.Metrics.PodsCreated.WithLabelValues(profile, "warm").Inc()
 	c.log.Info("warm pod created", "profile", profile, "pod", name)
 }
@@ -634,6 +727,8 @@ func (c *Controller) assignWarm(ctx context.Context, q catalog.Queue, id int, p 
 	c.assigned[p.Name] = now
 	c.sources[p.Name] = "warm"
 	c.mu.Unlock()
+	// The cache shows the pod as warm until the label patch arrives.
+	c.addPending(p.Name, pendingPod{queue: q.Name, scaleSetID: id})
 	payload := claim.Payload{JITConfig: jit.Config, Repo: q.Repo}
 	for _, nc := range q.Spec.Caches {
 		if nc.Type != catalog.CacheLanguage {
@@ -706,7 +801,7 @@ func (c *Controller) removeRunner(repo string, id int64) {
 func (c *Controller) deletePod(ctx context.Context, p *corev1.Pod, reason string) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if _, claimed := p.Annotations[c.cfg.Labels.ClaimedAnnotation()]; !claimed {
+	if !c.claimed(p) {
 		if id, err := strconv.ParseInt(p.Annotations[c.cfg.Labels.RunnerIDAnnotation()], 10, 64); err == nil {
 			c.removeRunner(p.Labels[c.cfg.Labels.Repo()], id)
 		}
@@ -717,6 +812,15 @@ func (c *Controller) deletePod(ctx context.Context, p *corev1.Pod, reason string
 		return
 	}
 	c.log.Info("pod deleted", "pod", p.Name, "reason", reason)
+}
+
+// claimed reports a pod whose agent received its configuration: annotated,
+// or known to the mailbox while the annotation patch is still on its way.
+func (c *Controller) claimed(p *corev1.Pod) bool {
+	if _, ok := p.Annotations[c.cfg.Labels.ClaimedAnnotation()]; ok {
+		return true
+	}
+	return c.cfg.Mailbox.Delivered(p.Name)
 }
 
 // GC deletes the managed pods nobody will use: pods of an unknown queue,
@@ -748,7 +852,7 @@ func (c *Controller) GC(ctx context.Context, startup bool) {
 		if state != pods.StateAssigned {
 			continue
 		}
-		if _, claimed := p.Annotations[c.cfg.Labels.ClaimedAnnotation()]; claimed {
+		if c.claimed(p) {
 			continue
 		}
 		at, err := time.Parse(time.RFC3339, p.Annotations[c.cfg.Labels.AssignedAnnotation()])
@@ -765,8 +869,15 @@ func (c *Controller) GC(ctx context.Context, startup bool) {
 			c.gcDelete(ctx, p, "lost_config")
 		}
 	}
-	for _, p := range c.warm.Stale(c.cfg.Pods.Managed(), warmNotReadyMaxAge, now) {
-		c.gcDelete(ctx, p, "warm_not_ready")
+	c.mu.Lock()
+	started := c.started
+	c.mu.Unlock()
+	// Right after a start the ready reports are not known yet: every warm
+	// pod would look stale.
+	if started.IsZero() || now.Sub(started) >= warmStartupGrace {
+		for _, p := range c.warm.Stale(c.cfg.Pods.Managed(), warmNotReadyMaxAge, now) {
+			c.gcDelete(ctx, p, "warm_not_ready")
+		}
 	}
 	if startup {
 		c.GCRunners(ctx)
@@ -815,7 +926,7 @@ func (c *Controller) GCRunners(ctx context.Context) {
 			continue
 		}
 		for _, r := range runners {
-			if !isDispatcherRunner(r.Name) || r.Status != "offline" || r.Busy || podNames[r.Name] {
+			if !isDispatcherRunner(r.Name) || r.Status != "offline" || r.Busy || podNames[r.Name] || c.knownNow(r.Name) {
 				continue
 			}
 			if err := c.cfg.API.RemoveRunner(ctx, repo, r.ID); err == nil {
@@ -824,6 +935,20 @@ func (c *Controller) GCRunners(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// knownNow re-checks a runner name right before its removal: the snapshot
+// taken before listing every repository may predate a runner created since.
+func (c *Controller) knownNow(name string) bool {
+	c.mu.Lock()
+	_, assigned := c.assigned[name]
+	_, pending := c.pending[name]
+	c.mu.Unlock()
+	if assigned || pending {
+		return true
+	}
+	_, cached := c.cfg.Pods.Get(name)
+	return cached
 }
 
 func isDispatcherRunner(name string) bool {

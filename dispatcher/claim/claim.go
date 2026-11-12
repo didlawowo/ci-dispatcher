@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -127,13 +128,31 @@ type box struct {
 	created   time.Time
 }
 
+// Per-client rate limit, applied before the shared TokenReview budget so a
+// single pod hammering the endpoint cannot starve the others.
+const (
+	perClientRate  = 1
+	perClientBurst = 5
+	clientIdleTTL  = 10 * time.Minute
+	// forgottenTTL keeps the names of deleted pods long enough to refuse a
+	// late Deposit (pod deleted between its creation and the deposit).
+	forgottenTTL = 30 * time.Minute
+)
+
+type clientLimiter struct {
+	l    *rate.Limiter
+	seen time.Time
+}
+
 // Server holds the mailboxes and serves the agents.
 type Server struct {
-	cfg     Config
-	limiter *rate.Limiter
-	mu      sync.Mutex
-	boxes   map[string]*box
-	ready   map[string]time.Time
+	cfg       Config
+	limiter   *rate.Limiter
+	mu        sync.Mutex
+	boxes     map[string]*box
+	ready     map[string]time.Time
+	forgotten map[string]time.Time
+	clients   map[string]*clientLimiter
 }
 
 // New builds a Server.
@@ -150,9 +169,37 @@ func New(cfg Config) *Server {
 	return &Server{
 		cfg:     cfg,
 		limiter: rate.NewLimiter(rate.Limit(cfg.ReviewRate), int(cfg.ReviewRate)*3),
-		boxes:   map[string]*box{},
-		ready:   map[string]time.Time{},
+		boxes:     map[string]*box{},
+		ready:     map[string]time.Time{},
+		forgotten: map[string]time.Time{},
+		clients:   map[string]*clientLimiter{},
 	}
+}
+
+// allowClient applies the per-client limit, keyed by the source IP (every
+// runner pod has its own).
+func (s *Server) allowClient(r *http.Request) bool {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.clients[ip]
+	if !ok {
+		if len(s.clients) > 1024 {
+			for k, v := range s.clients {
+				if now.Sub(v.seen) > clientIdleTTL {
+					delete(s.clients, k)
+				}
+			}
+		}
+		c = &clientLimiter{l: rate.NewLimiter(perClientRate, perClientBurst)}
+		s.clients[ip] = c
+	}
+	c.seen = now
+	return c.l.AllowN(now, 1)
 }
 
 func (s *Server) boxFor(pod string) *box {
@@ -169,6 +216,9 @@ func (s *Server) boxFor(pod string) *box {
 func (s *Server) Deposit(pod, uid string, p Payload) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, gone := s.forgotten[pod]; gone {
+		return errors.New("pod " + pod + " was deleted")
+	}
 	b := s.boxFor(pod)
 	if b.payload != nil || b.delivered {
 		return errors.New("a configuration was already given to pod " + pod)
@@ -185,6 +235,14 @@ func (s *Server) Pending(pod string) bool {
 	defer s.mu.Unlock()
 	b, ok := s.boxes[pod]
 	return ok && b.payload != nil
+}
+
+// Delivered reports a configuration already handed to the pod's agent.
+func (s *Server) Delivered(pod string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.boxes[pod]
+	return ok && b.delivered
 }
 
 // Ready returns when the agent of a pod last said it was ready.
@@ -204,6 +262,13 @@ func (s *Server) Forget(pod string) {
 	}
 	delete(s.boxes, pod)
 	delete(s.ready, pod)
+	now := time.Now()
+	for k, t := range s.forgotten {
+		if now.Sub(t) > forgottenTTL {
+			delete(s.forgotten, k)
+		}
+	}
+	s.forgotten[pod] = now
 }
 
 // Handler returns the HTTP handler.
@@ -221,7 +286,7 @@ func (s *Server) authenticate(r *http.Request) (*corev1.Pod, int) {
 	if !ok || token == "" || len(token) > 16<<10 {
 		return nil, http.StatusUnauthorized
 	}
-	if !s.limiter.Allow() {
+	if !s.allowClient(r) || !s.limiter.Allow() {
 		return nil, http.StatusTooManyRequests
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)

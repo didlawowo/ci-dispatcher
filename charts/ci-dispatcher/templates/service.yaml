@@ -1,5 +1,5 @@
 # Claim service for the runner agents: in-cluster only, routed to the
-# leader (the only ready replica).
+# leader (label set by the dispatcher on its own pod once it holds the Lease).
 apiVersion: v1
 kind: Service
 metadata:
@@ -7,7 +7,9 @@ metadata:
   labels: {{- include "ci-dispatcher.labels" . | nindent 4 }}
 spec:
   type: ClusterIP
-  selector: {{- include "ci-dispatcher.selector" . | nindent 4 }}
+  selector:
+    {{- include "ci-dispatcher.selector" . | nindent 4 }}
+    ci-dispatcher/leader: "true"
   ports:
     - {name: claim, port: {{ .Values.service.claimPort }}, targetPort: claim}
 ---

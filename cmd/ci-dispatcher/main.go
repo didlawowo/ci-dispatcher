@@ -26,6 +26,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -315,15 +316,11 @@ func run(o options, log *slog.Logger) error {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", m.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	// Only the leader holds the configurations: the Service routes claims to
-	// ready pods, and only the leader is ready.
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !leading.Load() {
-			http.Error(w, "not leading", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
+	// Readiness does not depend on the leadership: a rolling update must be
+	// able to start the new pod while the old one still holds the Lease. Only
+	// the leader holds the configurations, so the claim Service selects the
+	// pod labelled leader by markLeader instead.
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	metricsSrv := &http.Server{Addr: o.metricsAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -497,6 +494,7 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 		}
 	}()
 	leading.Store(true)
+	markLeader(ctx, kube, log)
 	log.Info("dispatcher serving", "queues", len(queues), "namespace", c.Runtime.Namespace)
 
 	<-ctx.Done()
@@ -510,6 +508,32 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 		log.Warn("sessions not all closed before the deadline")
 	}
 	return nil
+}
+
+// LeaderLabel marks the pod holding the Lease; the claim Service selects it.
+const LeaderLabel = "ci-dispatcher/leader"
+
+// markLeader labels the dispatcher's own pod as leader, retrying until it
+// succeeds or ctx ends. A former leader's pod is gone (the process exits when
+// it loses the Lease), so at most one pod carries the label for long.
+func markLeader(ctx context.Context, kube kubernetes.Interface, log *slog.Logger) {
+	name, ns := os.Getenv("POD_NAME"), os.Getenv("POD_NAMESPACE")
+	if name == "" || ns == "" {
+		return // local run, no Service in front
+	}
+	patch := []byte(`{"metadata":{"labels":{"` + LeaderLabel + `":"true"}}}`)
+	for delay := time.Second; ; delay = min(2*delay, 30*time.Second) {
+		_, err := kube.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+		if err == nil {
+			return
+		}
+		log.Warn("leader label not set, retrying", "error", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+	}
 }
 
 func metaOf(name, namespace string) metav1.ObjectMeta {

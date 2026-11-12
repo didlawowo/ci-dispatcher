@@ -31,6 +31,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        # Secret files are owned by root: the group lets uid 65532 read them.
+        fsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
       terminationGracePeriodSeconds: 40
       containers:
@@ -78,7 +80,7 @@ spec:
         - name: github
           secret:
             secretName: {{ $auth.secretRef.name }}
-            defaultMode: 0400
+            defaultMode: 0440
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}

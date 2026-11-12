@@ -25,6 +25,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -340,6 +341,11 @@ func run(o options, log *slog.Logger) error {
 		lead(ctx)
 		return nil
 	}
+	// A previous container of this pod may have led: leave the claim
+	// Service until the Lease is ours again.
+	unmarkCtx, unmarkCancel := context.WithTimeout(ctx, 30*time.Second)
+	setLeaderLabel(unmarkCtx, kube, false, log)
+	unmarkCancel()
 	identity := envOr("POD_NAME", hostname())
 	ns := o.leaseNamespace
 	if ns == "" {
@@ -360,6 +366,9 @@ func run(o options, log *slog.Logger) error {
 			OnStartedLeading: lead,
 			OnStoppedLeading: func() {
 				leading.Store(false)
+				unmarkCtx, unmarkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				setLeaderLabel(unmarkCtx, kube, false, log)
+				unmarkCancel()
 				log.Info("leadership lost")
 				cancel()
 			},
@@ -494,7 +503,7 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 		}
 	}()
 	leading.Store(true)
-	markLeader(ctx, kube, log)
+	setLeaderLabel(ctx, kube, true, log)
 	log.Info("dispatcher serving", "queues", len(queues), "namespace", c.Runtime.Namespace)
 
 	<-ctx.Done()
@@ -513,21 +522,29 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 // LeaderLabel marks the pod holding the Lease; the claim Service selects it.
 const LeaderLabel = "ci-dispatcher/leader"
 
-// markLeader labels the dispatcher's own pod as leader, retrying until it
-// succeeds or ctx ends. A former leader's pod is gone (the process exits when
-// it loses the Lease), so at most one pod carries the label for long.
-func markLeader(ctx context.Context, kube kubernetes.Interface, log *slog.Logger) {
+// setLeaderLabel sets (leader) or removes the leader label on the
+// dispatcher's own pod, retrying until it succeeds or ctx ends. The label is
+// removed when the process starts and when it loses the Lease: a container
+// restarted in the same pod must not stay behind the claim Service.
+func setLeaderLabel(ctx context.Context, kube kubernetes.Interface, leader bool, log *slog.Logger) {
 	name, ns := os.Getenv("POD_NAME"), os.Getenv("POD_NAMESPACE")
 	if name == "" || ns == "" {
 		return // local run, no Service in front
 	}
-	patch := []byte(`{"metadata":{"labels":{"` + LeaderLabel + `":"true"}}}`)
+	value := "null"
+	if leader {
+		value = `"true"`
+	}
+	patch := []byte(`{"metadata":{"labels":{"` + LeaderLabel + `":` + value + `}}}`)
 	for delay := time.Second; ; delay = min(2*delay, 30*time.Second) {
 		_, err := kube.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 		if err == nil {
 			return
 		}
-		log.Warn("leader label not set, retrying", "error", err)
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		log.Warn("leader label not updated, retrying", "leader", leader, "error", err)
 		select {
 		case <-ctx.Done():
 			return

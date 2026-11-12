@@ -361,7 +361,17 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	now := c.cfg.Now()
 	managed := c.cfg.Pods.Managed()
 	byID := c.queueRunners(managed)
-	usage := budget.UsageFromPods(c.cfg.Pods.RunnerPods())
+	runnerPods := c.cfg.Pods.RunnerPods()
+	usage := budget.UsageFromPods(runnerPods)
+	// Pending pods are matched against the same snapshot as byID and usage:
+	// the live cache may already show a pod the snapshot misses.
+	snapshot := make(map[string]*corev1.Pod, len(managed)+len(runnerPods))
+	for _, p := range runnerPods {
+		snapshot[p.Name] = p
+	}
+	for _, p := range managed {
+		snapshot[p.Name] = p
+	}
 
 	type surplus struct {
 		qs   *queueState
@@ -372,7 +382,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	var scaleDown []surplus
 
 	c.mu.Lock()
-	pendQueue, pendWarm := c.pendingCounts(now, usage)
+	pendQueue, pendWarm := c.pendingCounts(now, snapshot, usage)
 	for _, qs := range c.queues {
 		if qs.scaleSetID == 0 {
 			continue
@@ -501,13 +511,13 @@ func (c *Controller) Reconcile(ctx context.Context) {
 	}
 }
 
-// pendingCounts drops the pending pods the cache now shows (or too old) and
+// pendingCounts drops the pending pods the snapshot shows (or too old) and
 // counts the others per queue and per warm profile. A pending pod pinned to a
 // node and not yet cached is charged on that node. Called with c.mu held.
-func (c *Controller) pendingCounts(now time.Time, usage map[string]int) (map[string]int, map[string]int) {
+func (c *Controller) pendingCounts(now time.Time, snapshot map[string]*corev1.Pod, usage map[string]int) (map[string]int, map[string]int) {
 	perQueue, perWarm := map[string]int{}, map[string]int{}
 	for name, pp := range c.pending {
-		p, cached := c.cfg.Pods.Get(name)
+		p, cached := snapshot[name]
 		seen := cached && (pp.scaleSetID == 0 || p.Labels[c.cfg.Labels.ScaleSetID()] == strconv.Itoa(pp.scaleSetID))
 		if seen || now.Sub(pp.at) > pendingMaxAge {
 			delete(c.pending, name)
@@ -523,6 +533,15 @@ func (c *Controller) pendingCounts(now time.Time, usage map[string]int) (map[str
 		}
 	}
 	return perQueue, perWarm
+}
+
+// forgetPod drops the controller's records of a pod that will not run.
+func (c *Controller) forgetPod(name string) {
+	c.mu.Lock()
+	delete(c.assigned, name)
+	delete(c.sources, name)
+	delete(c.pending, name)
+	c.mu.Unlock()
 }
 
 func (c *Controller) addPending(name string, pp pendingPod) {
@@ -670,6 +689,7 @@ func (c *Controller) createCold(ctx context.Context, q catalog.Queue, id int, no
 	if err := c.cfg.Mailbox.Deposit(name, string(created.UID), claim.Payload{JITConfig: jit.Config, Repo: q.Repo}); err != nil {
 		// The pod was deleted meanwhile: its runner would stay registered.
 		c.removeRunner(q.Repo, jit.RunnerID)
+		c.forgetPod(name)
 		return err
 	}
 	c.cfg.Metrics.PodsCreated.WithLabelValues(q.Profile, "cold").Inc()
@@ -747,6 +767,9 @@ func (c *Controller) assignWarm(ctx context.Context, q catalog.Queue, id int, p 
 		break
 	}
 	if err := c.cfg.Mailbox.Deposit(p.Name, string(p.UID), payload); err != nil {
+		// The pod was deleted meanwhile: its runner would stay registered.
+		c.removeRunner(q.Repo, jit.RunnerID)
+		c.forgetPod(p.Name)
 		return err
 	}
 	c.log.Info("warm runner assigned", "queue", q.Name, "pod", p.Name, "node", p.Spec.NodeName)

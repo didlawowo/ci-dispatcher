@@ -167,8 +167,8 @@ func New(cfg Config) *Server {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
 	return &Server{
-		cfg:     cfg,
-		limiter: rate.NewLimiter(rate.Limit(cfg.ReviewRate), int(cfg.ReviewRate)*3),
+		cfg:       cfg,
+		limiter:   rate.NewLimiter(rate.Limit(cfg.ReviewRate), int(cfg.ReviewRate)*3),
 		boxes:     map[string]*box{},
 		ready:     map[string]time.Time{},
 		forgotten: map[string]time.Time{},

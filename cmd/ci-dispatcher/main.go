@@ -187,13 +187,53 @@ func kubeClient(o options) (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(cfg)
 }
 
+// visibilityDelays are the waits between visibility lookups of one
+// repository: a transient GitHub error must not stop every queue.
+var visibilityDelays = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
+
 // resolve returns the queues, checking every repository's GitHub visibility.
-func resolve(ctx context.Context, c *catalog.Catalog, api gh.API) ([]catalog.Queue, error) {
-	var vis catalog.Visibility
-	if api != nil {
-		vis = func(repo string) (bool, error) { return api.IsPublic(ctx, repo) }
+// A repository whose visibility stays unknown after the retries is left out
+// (an unknown visibility could serve a public repository with a private
+// profile); the other repositories are served.
+func resolve(ctx context.Context, c *catalog.Catalog, api gh.API, log *slog.Logger) ([]catalog.Queue, error) {
+	if api == nil {
+		return c.Resolve(nil)
 	}
-	return c.Resolve(vis)
+	public := map[string]bool{}
+	for _, name := range c.RepoNames() {
+		p, err := lookupVisibility(ctx, api, name)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Error("repository left out: visibility unknown", "repo", name, "error", err)
+			c.RemoveRepo(name)
+			continue
+		}
+		public[name] = p
+	}
+	return c.Resolve(func(repo string) (bool, error) { return public[repo], nil })
+}
+
+func lookupVisibility(ctx context.Context, api gh.API, repo string) (bool, error) {
+	var err error
+	for attempt := 0; ; attempt++ {
+		var p bool
+		if p, err = api.IsPublic(ctx, repo); err == nil {
+			return p, nil
+		}
+		// A missing repository will not appear by retrying.
+		if gh.IsNotFound(err) || attempt >= len(visibilityDelays) {
+			return false, err
+		}
+		t := time.NewTimer(visibilityDelays[attempt])
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return false, ctx.Err()
+		case <-t.C:
+		}
+	}
 }
 
 func validate(o options) error {
@@ -415,7 +455,7 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 		c.AddDiscovered(names)
 		log.Info("repositories discovered", "count", len(names))
 	}
-	queues, err := resolve(ctx, c, api)
+	queues, err := resolve(ctx, c, api, log)
 	if err != nil {
 		return err
 	}
@@ -440,9 +480,11 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 		Logger:    log.With("component", "claim"),
 		OnClaimed: func(pod, uid string, d time.Duration) { ctrl.OnClaimed(pod, uid, d) },
 	})
+	var pool *sessions.Pool
 	ctrl = controller.New(controller.Config{
 		Catalog: c, Queues: queues, API: api, Pods: mgr, Mailbox: claims, Renderer: renderer,
 		Metrics: m, Labels: labels, AgentImage: img, Logger: log.With("component", "controller"),
+		OnScaleSetGone: func(queue string, id int) { pool.Invalidate(queue, id) },
 	})
 	mgr.OnPod(ctrl.OnPod)
 	if err := mgr.Start(ctx); err != nil {
@@ -468,7 +510,7 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 	}()
 	defer shutdown(claimSrv)
 
-	pool := sessions.NewPool(sessions.Config{
+	pool = sessions.NewPool(sessions.Config{
 		API: api, Handler: ctrl, Owner: envOr("POD_NAME", hostname()),
 		Logger:  log.With("component", "sessions"),
 		OnState: func(string, string) {},

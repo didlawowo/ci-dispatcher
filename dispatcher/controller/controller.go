@@ -33,7 +33,10 @@ import (
 
 // Timing of the controller.
 const (
-	reconcileEvery     = 15 * time.Second
+	reconcileEvery = 15 * time.Second
+	// Backoff of a queue whose runner creations fail.
+	provisionRetryMin  = 2 * time.Second
+	provisionRetryMax  = 60 * time.Second
 	gcEvery            = 5 * time.Minute
 	runnerGCEvery      = 15 * time.Minute
 	completedGrace     = 60 * time.Second
@@ -86,6 +89,10 @@ type Config struct {
 	Labels     pods.Labels
 	AgentImage string
 	Logger     *slog.Logger
+	// OnScaleSetGone is called when GitHub answers not found for a scale
+	// set while registering a runner: the sessions close it and adopt or
+	// recreate the scale set by name (sessions.Pool.Invalidate).
+	OnScaleSetGone func(queue string, scaleSetID int)
 	// Now replaces the clock (tests).
 	Now func() time.Time
 }
@@ -108,6 +115,10 @@ type queueState struct {
 	desired    int
 	inflight   int
 	warmOK     bool
+	// failures counts consecutive runner creations that failed; no new
+	// runner is started for the queue before retryAt.
+	failures int
+	retryAt  time.Time
 }
 
 // Controller implements sessions.Handler.
@@ -388,6 +399,9 @@ func (c *Controller) Reconcile(ctx context.Context) {
 			continue
 		}
 		pend := pendQueue[qs.q.Name]
+		if now.Before(qs.retryAt) && qs.desired > len(byID[qs.scaleSetID])+qs.inflight+pend {
+			continue
+		}
 		active := len(byID[qs.scaleSetID]) + qs.inflight + pend
 		switch {
 		case qs.desired > active:
@@ -448,7 +462,10 @@ func (c *Controller) Reconcile(ctx context.Context) {
 					if err := c.assignWarm(ctx, q, id, pod); err != nil {
 						c.warm.Release(pod.Name)
 						c.log.Warn("warm assignment failed", "queue", q.Name, "pod", pod.Name, "error", err)
+						c.provisionFailed(qs, id, err)
+						return
 					}
+					c.provisionSucceeded(qs)
 				})
 			}
 		}
@@ -607,16 +624,56 @@ func (c *Controller) provision(ctx context.Context, qs *queueState, node string)
 			// must not take it meanwhile. OnPod releases it on deletion.
 			err := c.assignWarm(ctx, q, id, p)
 			if err == nil {
+				c.provisionSucceeded(qs)
 				c.kick() // refill the reserve
 				return
 			}
 			c.warm.Release(p.Name)
 			c.log.Warn("warm assignment failed, creating a cold pod", "queue", q.Name, "pod", p.Name, "error", err)
+			if gh.IsNotFound(err) {
+				c.provisionFailed(qs, id, err)
+				return
+			}
 		}
 	}
 	if err := c.createCold(ctx, q, id, node); err != nil {
 		c.log.Warn("cold pod not created", "queue", q.Name, "error", err)
+		c.provisionFailed(qs, id, err)
+		return
 	}
+	c.provisionSucceeded(qs)
+}
+
+// provisionFailed backs the queue off. A scale set GitHub no longer knows
+// is dropped until the sessions adopt or recreate one (OnScaleSet).
+func (c *Controller) provisionFailed(qs *queueState, id int, err error) {
+	c.mu.Lock()
+	qs.failures++
+	wait := provisionRetryMax
+	if qs.failures <= 5 {
+		wait = min(provisionRetryMin<<(qs.failures-1), provisionRetryMax)
+	}
+	qs.retryAt = c.cfg.Now().Add(wait)
+	gone := gh.IsNotFound(err) && id != 0 && qs.scaleSetID == id
+	if gone {
+		delete(c.byID, id)
+		qs.scaleSetID = 0
+	}
+	queue := qs.q.Name
+	c.mu.Unlock()
+	if gone {
+		c.log.Warn("scale set gone on GitHub, asking the session to recreate it", "queue", queue, "scaleSetID", id)
+		if c.cfg.OnScaleSetGone != nil {
+			c.cfg.OnScaleSetGone(queue, id)
+		}
+	}
+}
+
+func (c *Controller) provisionSucceeded(qs *queueState) {
+	c.mu.Lock()
+	qs.failures = 0
+	qs.retryAt = time.Time{}
+	c.mu.Unlock()
 }
 
 func (c *Controller) runnerName(profile string) string {

@@ -266,6 +266,18 @@ func (c *Catalog) RepoNames() []string {
 	return out
 }
 
+// RemoveRepo drops the repository of that GitHub name (case-insensitive):
+// its queues are not served. It reports whether a repository was removed.
+func (c *Catalog) RemoveRepo(name string) bool {
+	for key, r := range c.Repos {
+		if strings.EqualFold(r.repoName(key), name) {
+			delete(c.Repos, key)
+			return true
+		}
+	}
+	return false
+}
+
 // AddDiscovered adds repositories found by discovery that the catalog does
 // not list yet, with the default settings.
 func (c *Catalog) AddDiscovered(names []string) {

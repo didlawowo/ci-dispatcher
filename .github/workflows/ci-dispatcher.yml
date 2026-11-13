@@ -25,6 +25,8 @@ env:
 
 jobs:
   go:
+    # A release tag points at a commit already validated on main.
+    if: github.ref_type != 'tag'
     runs-on: arc-runner-ci-dispatcher
     steps:
       - uses: actions/checkout@v7
@@ -50,6 +52,7 @@ jobs:
         run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" . ./listener/... ./dispatcher/... ./cmd/...
 
   chart:
+    if: github.ref_type != 'tag'
     runs-on: arc-runner-ci-dispatcher
     steps:
       - uses: actions/checkout@v7
@@ -64,6 +67,7 @@ jobs:
           helm template ci-dispatcher charts/ci-dispatcher --namespace ci-runners > /dev/null
 
   secrets:
+    if: github.ref_type != 'tag'
     runs-on: arc-runner-ci-dispatcher
     steps:
       - uses: actions/checkout@v7
@@ -75,6 +79,7 @@ jobs:
           /tmp/gitleaks git --redact --no-banner --config .gitleaks.toml --exit-code 1 .
 
   image:
+    if: github.ref_type != 'tag'
     needs: [go, chart]
     runs-on: arc-runner-ci-dispatcher
     steps:
@@ -102,13 +107,26 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/dispatcher-v')
-    needs: [go, chart, secrets, image]
     runs-on: arc-runner-ci-dispatcher
     permissions:
       contents: read
       packages: write
+      actions: read
     steps:
       - uses: actions/checkout@v7
+      # The checks are not rerun on a tag: the tagged commit must already have
+      # a successful run of this workflow on main.
+      - name: tagged commit validated on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/ci-dispatcher.yml/runs?branch=main&head_sha=$GITHUB_SHA&status=success&per_page=1" \
+            | grep -o '"total_count": *[0-9]*' | grep -o '[0-9]*$')
+          if [ "$runs" = 0 ]; then
+            echo "::error::$GITHUB_SHA has no successful ci-dispatcher run on main"
+            exit 1
+          fi
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:

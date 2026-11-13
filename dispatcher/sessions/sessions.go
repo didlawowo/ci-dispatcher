@@ -69,6 +69,14 @@ type Pool struct {
 	wg  sync.WaitGroup
 	mu  sync.Mutex
 	st  map[string]string
+	cur map[string]current
+}
+
+// current is the scale set a queue's session is open on.
+type current struct {
+	id          int
+	cancel      context.CancelFunc
+	invalidated bool
 }
 
 // NewPool builds a Pool.
@@ -82,7 +90,7 @@ func NewPool(cfg Config) *Pool {
 	if cfg.BackoffMax == 0 {
 		cfg.BackoffMax = 60 * time.Second
 	}
-	return &Pool{cfg: cfg, st: map[string]string{}}
+	return &Pool{cfg: cfg, st: map[string]string{}, cur: map[string]current{}}
 }
 
 // Start launches one goroutine per queue. Sessions stop when ctx is done.
@@ -108,6 +116,32 @@ func (p *Pool) States() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// Invalidate reports the scale set of a queue as gone on GitHub (a runner
+// registration answered not found): the session on that scale set is closed
+// and the next round adopts or recreates the scale set by name. A call for
+// another scale set than the open one is ignored.
+func (p *Pool) Invalidate(queue string, scaleSetID int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.cur[queue]
+	if !ok || c.id != scaleSetID || c.invalidated {
+		return
+	}
+	c.invalidated = true
+	p.cur[queue] = c
+	c.cancel()
+}
+
+// takeInvalidated clears the open scale set of a queue and reports whether
+// it was invalidated.
+func (p *Pool) takeInvalidated(queue string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c := p.cur[queue]
+	delete(p.cur, queue)
+	return c.invalidated
 }
 
 func (p *Pool) setState(queue, state string) {
@@ -158,9 +192,26 @@ func (p *Pool) run(ctx context.Context, s Spec) {
 	p.setState(s.Name, StateStarting)
 	var delay time.Duration
 	for ctx.Err() == nil {
+		began := time.Now()
 		err := p.once(ctx, s, log)
 		if ctx.Err() != nil {
 			return
+		}
+		// A failure after a long healthy session starts the backoff over.
+		if time.Since(began) > p.cfg.BackoffMax {
+			delay = 0
+		}
+		if p.takeInvalidated(s.Name) {
+			// Backed off like any failure: a scale set that keeps answering
+			// not found must not be reopened in a tight loop.
+			p.setState(s.Name, StateStarting)
+			p.failed("not_found")
+			log.Warn("scale set gone, adopting or recreating it")
+			delay = p.backoff(delay)
+			if !sleep(ctx, delay) {
+				return
+			}
+			continue
 		}
 		switch {
 		case err == nil:
@@ -210,6 +261,13 @@ func (p *Pool) once(ctx context.Context, s Spec, log *slog.Logger) error {
 	if created {
 		log.Info("scale set created", "scaleSetID", id)
 	}
+	// The session runs under its own context so that Invalidate can close
+	// it without stopping the queue.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	p.mu.Lock()
+	p.cur[s.Name] = current{id: id, cancel: cancel}
+	p.mu.Unlock()
 	p.cfg.Handler.OnScaleSet(s.Name, id)
 
 	session, err := p.cfg.API.OpenSession(ctx, s.Repo, id, p.cfg.Owner)

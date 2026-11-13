@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/dispatcher/catalog"
 	"github.com/actions/scaleset/dispatcher/claim"
 	"github.com/actions/scaleset/dispatcher/gh"
@@ -63,5 +66,123 @@ func TestWarmRunnerAssignedAtFullCapacity(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("warm pod was not assigned at full capacity")
+	}
+}
+
+// jitAPI answers every runner registration with err.
+type jitAPI struct {
+	gh.API
+	err   error
+	calls chan struct{}
+}
+
+func (a jitAPI) GenerateJIT(context.Context, string, int, string) (gh.JIT, error) {
+	a.calls <- struct{}{}
+	return gh.JIT{}, a.err
+}
+
+func warmSetup(api gh.API, gone func(string, int)) (*Controller, catalog.Queue) {
+	labels := pods.Labels{Prefix: "example.com/ci"}
+	now := time.Now()
+	p := &testPods{pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "warm-one", UID: "uid", Labels: map[string]string{labels.Profile(): "light", labels.State(): pods.StateWarm}}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}, patched: make(chan string, 1)}
+	cat := &catalog.Catalog{Profiles: map[string]*catalog.Profile{"light": {Warm: 1, Nodes: []string{"node-a"}}}, Capacity: catalog.Capacity{Enforce: true, Nodes: map[string]catalog.NodeCapacity{"node-a": {Places: 1}}}}
+	q := catalog.Queue{Name: "queue", Repo: "repo", Profile: "light", MaxRunners: 1, Spec: cat.ProfileSpec("light")}
+	c := New(Config{Catalog: cat, Queues: []catalog.Queue{q}, API: api, Pods: p, Mailbox: &testMailbox{ready: now}, Metrics: metrics.New(), Labels: labels, Now: func() time.Time { return now }, OnScaleSetGone: gone})
+	c.OnScaleSet(q.Name, 1)
+	c.mu.Lock()
+	c.queues[q.Name].desired = 1
+	c.mu.Unlock()
+	return c, q
+}
+
+// waitIdle waits until no runner start is in flight.
+func waitIdle(t *testing.T, c *Controller) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		n := c.queues["queue"].inflight
+		c.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("runner start still in flight")
+}
+
+func TestScaleSetGoneIsReportedOnceAndNotRetried(t *testing.T) {
+	gone := make(chan [2]any, 4)
+	api := jitAPI{err: fmt.Errorf("generate JIT config: %w", scaleset.NotFoundError), calls: make(chan struct{}, 16)}
+	c, q := warmSetup(api, func(queue string, id int) { gone <- [2]any{queue, id} })
+	c.Reconcile(context.Background())
+	waitIdle(t, c)
+	select {
+	case g := <-gone:
+		if g[0] != q.Name || g[1] != 1 {
+			t.Fatalf("reported %v", g)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scale set gone not reported")
+	}
+	// Until the sessions bring a scale set back, the queue starts nothing.
+	for range 3 {
+		c.Reconcile(context.Background())
+		waitIdle(t, c)
+	}
+	if n := len(api.calls); n != 1 {
+		t.Fatalf("GenerateJIT called %d times, want 1", n)
+	}
+	if len(gone) != 0 {
+		t.Fatal("scale set gone reported twice")
+	}
+	c.OnScaleSet(q.Name, 2)
+	c.mu.Lock()
+	id := c.queues[q.Name].scaleSetID
+	c.mu.Unlock()
+	if id != 2 {
+		t.Fatalf("scale set %d after recreation", id)
+	}
+}
+
+func TestFailedRunnerCreationBacksOff(t *testing.T) {
+	api := jitAPI{err: errors.New("HTTP 502"), calls: make(chan struct{}, 16)}
+	c, _ := warmSetup(api, func(string, int) { t.Error("a 502 is not a deleted scale set") })
+	for range 4 {
+		c.Reconcile(context.Background())
+		waitIdle(t, c)
+	}
+	if n := len(api.calls); n != 1 {
+		t.Fatalf("GenerateJIT called %d times within the backoff, want 1", n)
+	}
+	c.mu.Lock()
+	qs := c.queues["queue"]
+	failures, retryAt, id := qs.failures, qs.retryAt, qs.scaleSetID
+	c.mu.Unlock()
+	if failures != 1 || !retryAt.After(c.cfg.Now()) || id != 1 {
+		t.Fatalf("failures=%d retryAt=%v scaleSetID=%d", failures, retryAt, id)
+	}
+	// A second start of the same round failing counts once.
+	c.provisionFailed(qs, 1, errors.New("HTTP 502"))
+	if c.queues["queue"].failures != 1 {
+		t.Fatalf("failures=%d after two failures of one round", c.queues["queue"].failures)
+	}
+}
+
+func TestRunnerCreationBackoffSchedule(t *testing.T) {
+	c, _ := warmSetup(jitAPI{calls: make(chan struct{}, 1)}, nil)
+	now := time.Now()
+	c.cfg.Now = func() time.Time { return now }
+	qs := c.queues["queue"]
+	for i, want := range []time.Duration{2, 4, 8, 16, 32, 60, 60} {
+		c.provisionFailed(qs, 1, errors.New("HTTP 502"))
+		if got := qs.retryAt.Sub(now); got != want*time.Second {
+			t.Fatalf("failure %d: wait %v, want %v", i+1, got, want*time.Second)
+		}
+		now = qs.retryAt // next round
+	}
+	c.provisionSucceeded(qs)
+	if qs.failures != 0 || !qs.retryAt.IsZero() {
+		t.Fatalf("success kept failures=%d retryAt=%v", qs.failures, qs.retryAt)
 	}
 }

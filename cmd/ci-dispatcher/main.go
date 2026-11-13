@@ -187,13 +187,92 @@ func kubeClient(o options) (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(cfg)
 }
 
+// visibilityDelays are the waits between visibility lookups of one
+// repository: a transient GitHub error must not stop every queue.
+var visibilityDelays = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
+
 // resolve returns the queues, checking every repository's GitHub visibility.
-func resolve(ctx context.Context, c *catalog.Catalog, api gh.API) ([]catalog.Queue, error) {
-	var vis catalog.Visibility
-	if api != nil {
-		vis = func(repo string) (bool, error) { return api.IsPublic(ctx, repo) }
+// A repository whose visibility stays unknown after the retries is left out
+// (an unknown visibility could serve a public repository with a private
+// profile) and returned in excluded; the other repositories are served. It
+// fails when no repository's visibility is known.
+func resolve(ctx context.Context, c *catalog.Catalog, api gh.API, log *slog.Logger) (queues []catalog.Queue, excluded []string, err error) {
+	if api == nil {
+		queues, err = c.Resolve(nil)
+		return queues, nil, err
 	}
-	return c.Resolve(vis)
+	names := c.RepoNames()
+	public := map[string]bool{}
+	for _, name := range names {
+		p, err := lookupVisibility(ctx, api, name)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			log.Error("repository left out: visibility unknown", "repo", name, "error", err)
+			excluded = append(excluded, name)
+			continue
+		}
+		public[name] = p
+	}
+	if len(names) > 0 && len(public) == 0 {
+		return nil, excluded, fmt.Errorf("visibility unknown for every repository (%d)", len(names))
+	}
+	for _, name := range excluded {
+		c.RemoveRepo(name)
+	}
+	queues, err = c.Resolve(func(repo string) (bool, error) {
+		p, ok := public[repo]
+		if !ok {
+			return false, fmt.Errorf("repo %s: visibility not looked up", repo)
+		}
+		return p, nil
+	})
+	return queues, excluded, err
+}
+
+// visibilityRecheckEvery spaces the lookups of the repositories left out at
+// startup. One found again restarts the dispatcher, which then serves it.
+var visibilityRecheckEvery = 5 * time.Minute
+
+// recheckExcluded returns once one excluded repository's visibility is known
+// again (nil when ctx ends first).
+func recheckExcluded(ctx context.Context, api gh.API, excluded []string) error {
+	t := time.NewTicker(visibilityRecheckEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+		}
+		for _, name := range excluded {
+			if _, err := api.IsPublic(ctx, name); err == nil {
+				return fmt.Errorf("repository %s reachable again, restarting to serve it", name)
+			}
+		}
+	}
+}
+
+func lookupVisibility(ctx context.Context, api gh.API, repo string) (bool, error) {
+	var err error
+	for attempt := 0; ; attempt++ {
+		var p bool
+		if p, err = api.IsPublic(ctx, repo); err == nil {
+			return p, nil
+		}
+		// A missing repository will not appear by retrying.
+		if gh.IsNotFound(err) || attempt >= len(visibilityDelays) {
+			return false, err
+		}
+		t := time.NewTimer(visibilityDelays[attempt])
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return false, ctx.Err()
+		case <-t.C:
+		}
+	}
 }
 
 func validate(o options) error {
@@ -407,6 +486,8 @@ func controlPlaneNodes(nodes []*corev1.Node) []string {
 
 // serve runs everything that needs the leadership.
 func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, kube kubernetes.Interface, m *metrics.Metrics, img string, log *slog.Logger, leading *atomic.Bool) error {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	if c.Discovery.Enabled {
 		names, err := api.InstallationRepos(ctx)
 		if err != nil {
@@ -415,7 +496,7 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 		c.AddDiscovered(names)
 		log.Info("repositories discovered", "count", len(names))
 	}
-	queues, err := resolve(ctx, c, api)
+	queues, excluded, err := resolve(ctx, c, api, log)
 	if err != nil {
 		return err
 	}
@@ -440,9 +521,11 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 		Logger:    log.With("component", "claim"),
 		OnClaimed: func(pod, uid string, d time.Duration) { ctrl.OnClaimed(pod, uid, d) },
 	})
+	var pool *sessions.Pool
 	ctrl = controller.New(controller.Config{
 		Catalog: c, Queues: queues, API: api, Pods: mgr, Mailbox: claims, Renderer: renderer,
 		Metrics: m, Labels: labels, AgentImage: img, Logger: log.With("component", "controller"),
+		OnScaleSetGone: func(queue string, id int) { pool.Invalidate(queue, id) },
 	})
 	mgr.OnPod(ctrl.OnPod)
 	if err := mgr.Start(ctx); err != nil {
@@ -468,7 +551,7 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 	}()
 	defer shutdown(claimSrv)
 
-	pool := sessions.NewPool(sessions.Config{
+	pool = sessions.NewPool(sessions.Config{
 		API: api, Handler: ctrl, Owner: envOr("POD_NAME", hostname()),
 		Logger:  log.With("component", "sessions"),
 		OnState: func(string, string) {},
@@ -506,7 +589,17 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 	setLeaderLabel(ctx, kube, true, log)
 	log.Info("dispatcher serving", "queues", len(queues), "namespace", c.Runtime.Namespace)
 
-	<-ctx.Done()
+	restart := make(chan error, 1)
+	if len(excluded) > 0 {
+		m.SessionErrors.WithLabelValues("visibility").Add(float64(len(excluded)))
+		go func() { restart <- recheckExcluded(ctx, api, excluded) }()
+	}
+	var restartErr error
+	select {
+	case <-ctx.Done():
+	case restartErr = <-restart:
+		stop()
+	}
 	leading.Store(false)
 	log.Info("closing sessions")
 	done := make(chan struct{})
@@ -516,7 +609,7 @@ func serve(ctx context.Context, o options, c *catalog.Catalog, api *gh.Client, k
 	case <-time.After(25 * time.Second):
 		log.Warn("sessions not all closed before the deadline")
 	}
-	return nil
+	return restartErr
 }
 
 // LeaderLabel marks the pod holding the Lease; the claim Service selects it.

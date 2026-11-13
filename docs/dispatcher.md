@@ -64,6 +64,17 @@ Only outbound connections: no webhook, no ingress.
    Idle surplus runners (assigned for more than 2 minutes, no job) are
    unregistered and deleted.
 
+A queue whose runner registrations fail backs off (2 s doubling to 60 s)
+instead of retrying at every reconciliation. A registration answered `not
+found` means the scale set was deleted on GitHub (by ARC finishing its
+cleanup after an adoption, for example): the session on it is closed and the
+scale set is adopted again by name, or recreated. At startup, a repository
+whose visibility stays unknown after a few retries is left out, logged and
+counted in `ci_dispatcher_session_errors_total{reason="visibility"}`; the
+other repositories are served, and the dispatcher restarts to serve it as
+soon as a recheck (every 5 minutes) reaches it. With no repository's
+visibility known, the dispatcher stops (and Kubernetes restarts it).
+
 Garbage collection (startup, then every 5 minutes): pods of an unknown queue,
 assigned pods that never claimed their configuration within 10 minutes or
 whose configuration was lost (dispatcher restart), warm pods that never

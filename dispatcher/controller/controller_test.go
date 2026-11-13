@@ -162,4 +162,9 @@ func TestFailedRunnerCreationBacksOff(t *testing.T) {
 	if failures != 1 || !retryAt.After(c.cfg.Now()) || id != 1 {
 		t.Fatalf("failures=%d retryAt=%v scaleSetID=%d", failures, retryAt, id)
 	}
+	// A second start of the same round failing counts once.
+	c.provisionFailed(qs, 1, errors.New("HTTP 502"))
+	if c.queues["queue"].failures != 1 {
+		t.Fatalf("failures=%d after two failures of one round", c.queues["queue"].failures)
+	}
 }

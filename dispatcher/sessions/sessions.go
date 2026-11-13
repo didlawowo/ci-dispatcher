@@ -192,11 +192,17 @@ func (p *Pool) run(ctx context.Context, s Spec) {
 	p.setState(s.Name, StateStarting)
 	var delay time.Duration
 	for ctx.Err() == nil {
+		began := time.Now()
 		err := p.once(ctx, s, log)
 		if ctx.Err() != nil {
 			return
 		}
 		if p.takeInvalidated(s.Name) {
+			// An invalidation after a long healthy session starts the
+			// backoff over.
+			if time.Since(began) > p.cfg.BackoffMax {
+				delay = 0
+			}
 			// Backed off like any failure: a scale set that keeps answering
 			// not found must not be reopened in a tight loop.
 			p.setState(s.Name, StateStarting)

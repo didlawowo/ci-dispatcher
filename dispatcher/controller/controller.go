@@ -648,12 +648,16 @@ func (c *Controller) provision(ctx context.Context, qs *queueState, node string)
 // is dropped until the sessions adopt or recreate one (OnScaleSet).
 func (c *Controller) provisionFailed(qs *queueState, id int, err error) {
 	c.mu.Lock()
-	qs.failures++
+	now := c.cfg.Now()
+	// Starts granted in the same round fail together: they count once.
+	if !now.Before(qs.retryAt) {
+		qs.failures++
+	}
 	wait := provisionRetryMax
 	if qs.failures <= 5 {
 		wait = min(provisionRetryMin<<(qs.failures-1), provisionRetryMax)
 	}
-	qs.retryAt = c.cfg.Now().Add(wait)
+	qs.retryAt = now.Add(wait)
 	gone := gh.IsNotFound(err) && id != 0 && qs.scaleSetID == id
 	if gone {
 		delete(c.byID, id)

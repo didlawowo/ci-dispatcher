@@ -168,3 +168,21 @@ func TestFailedRunnerCreationBacksOff(t *testing.T) {
 		t.Fatalf("failures=%d after two failures of one round", c.queues["queue"].failures)
 	}
 }
+
+func TestRunnerCreationBackoffSchedule(t *testing.T) {
+	c, _ := warmSetup(jitAPI{calls: make(chan struct{}, 1)}, nil)
+	now := time.Now()
+	c.cfg.Now = func() time.Time { return now }
+	qs := c.queues["queue"]
+	for i, want := range []time.Duration{2, 4, 8, 16, 32, 60, 60} {
+		c.provisionFailed(qs, 1, errors.New("HTTP 502"))
+		if got := qs.retryAt.Sub(now); got != want*time.Second {
+			t.Fatalf("failure %d: wait %v, want %v", i+1, got, want*time.Second)
+		}
+		now = qs.retryAt // next round
+	}
+	c.provisionSucceeded(qs)
+	if qs.failures != 0 || !qs.retryAt.IsZero() {
+		t.Fatalf("success kept failures=%d retryAt=%v", qs.failures, qs.retryAt)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ type visibilityAPI struct {
 	failures map[string]int
 	err      map[string]error
 	calls    map[string]int
+	public   map[string]bool
 }
 
 func (a *visibilityAPI) IsPublic(_ context.Context, repo string) (bool, error) {
@@ -28,7 +30,7 @@ func (a *visibilityAPI) IsPublic(_ context.Context, repo string) (bool, error) {
 	if a.calls[repo] <= a.failures[repo] {
 		return false, a.err[repo]
 	}
-	return false, nil
+	return a.public[repo], nil
 }
 
 func testCatalog() *catalog.Catalog {
@@ -93,5 +95,52 @@ func TestRecheckExcludedRestartsOnceARepoIsBack(t *testing.T) {
 	}
 	if api.calls["broken"] != 3 {
 		t.Fatalf("lookups %d, want 3", api.calls["broken"])
+	}
+}
+
+func TestResolveKeepsVisibilityAndEdgeCases(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	api := &visibilityAPI{calls: map[string]int{}, public: map[string]bool{"steady": true}}
+	c := testCatalog()
+	c.Profiles["public"] = &catalog.Profile{Trust: catalog.TrustPublic, Nodes: []string{"node-a"}}
+	c.Defaults.PublicProfile = "public"
+	queues, excluded, err := resolve(context.Background(), c, api, log)
+	if err != nil || len(excluded) != 0 {
+		t.Fatalf("err=%v excluded=%v", err, excluded)
+	}
+	for _, q := range queues {
+		if (q.Repo == "steady") != (q.Profile == "public") {
+			t.Fatalf("queue %s of %s on profile %s", q.Name, q.Repo, q.Profile)
+		}
+	}
+	if q, _, err := resolve(context.Background(), testCatalog(), nil, log); err != nil || len(q) != 4 {
+		t.Fatalf("offline resolve: %d queues, %v", len(q), err)
+	}
+	empty := testCatalog()
+	empty.Repos = nil
+	if _, _, err := resolve(context.Background(), empty, api, log); err != nil {
+		t.Fatalf("an empty catalog is not an error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	failing := &visibilityAPI{failures: map[string]int{"steady": 9, "flaky": 9, "broken": 9, "gone": 9}, err: map[string]error{"steady": errors.New("x"), "flaky": errors.New("x"), "broken": errors.New("x"), "gone": errors.New("x")}, calls: map[string]int{}}
+	if _, excluded, err := resolve(ctx, testCatalog(), failing, log); !errors.Is(err, context.Canceled) || len(excluded) != 0 {
+		t.Fatalf("canceled resolve: excluded=%v err=%v", excluded, err)
+	}
+}
+
+func TestRecheckExcludedSkipsAStillFailingRepo(t *testing.T) {
+	saved := visibilityRecheckEvery
+	visibilityRecheckEvery = time.Millisecond
+	defer func() { visibilityRecheckEvery = saved }()
+	bad := errors.New("HTTP 502")
+	api := &visibilityAPI{failures: map[string]int{"dead": 1000, "back": 1}, err: map[string]error{"dead": bad, "back": bad}, calls: map[string]int{}}
+	if err := recheckExcluded(context.Background(), api, []string{"dead", "back"}); err == nil || !strings.Contains(err.Error(), "back") {
+		t.Fatalf("restart reason %v, want the repository that came back", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := recheckExcluded(ctx, api, []string{"dead"}); err != nil {
+		t.Fatalf("a stopped dispatcher does not restart: %v", err)
 	}
 }

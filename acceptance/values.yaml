@@ -2,22 +2,12 @@
 #
 # Read on main by the Application ci-dispatcher-acceptance (continuous-
 # delivery), which deploys it in its own namespace, with its own Lease and a
-# catalog limited to the acceptance queue of this repository. That catalog
-# lives in the Application; Helm merges the block below into it.
+# catalog limited to the acceptance queue of this repository. The catalog
+# lives in that Application, not here.
 #
-# cd.yml writes image.tag, image.digest and CI_DISPATCHER_CANDIDATE
-# (<version>@<digest>). The dispatcher hands that variable to every runner it
-# serves, warm pods included (claim): an acceptance job proves it was served by
-# a dispatcher that loaded this very candidate, not by the previous one still
-# running while the new pod fails to start.
-#
-# Production never reads this file: it follows charts/ci-dispatcher/values.yaml,
-# written by the promote job after a green acceptance.
+# Only image.tag and image.digest are written, by cd.yml. Production never
+# reads this file: it follows charts/ci-dispatcher/values.yaml, written by the
+# promote job after a green acceptance.
 image:
   tag: "0.1.2"
   digest: "sha256:45758ec14ae14da4a47b015d096fb61c4719a7c9d368660457b1c665ab6b9802"
-catalog:
-  repos:
-    ci-dispatcher:
-      env:
-        CI_DISPATCHER_CANDIDATE: "0.1.2@sha256:45758ec14ae14da4a47b015d096fb61c4719a7c9d368660457b1c665ab6b9802"

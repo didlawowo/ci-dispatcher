@@ -747,7 +747,7 @@ func (c *Controller) createCold(ctx context.Context, q catalog.Queue, id int, no
 		return fmt.Errorf("create pod %s: %w", name, err)
 	}
 	c.addPending(name, pendingPod{queue: q.Name, node: node})
-	if err := c.cfg.Mailbox.Deposit(name, string(created.UID), claim.Payload{JITConfig: jit.Config, Repo: q.Repo}); err != nil {
+	if err := c.cfg.Mailbox.Deposit(name, string(created.UID), c.servedBy(claim.Payload{JITConfig: jit.Config, Repo: q.Repo})); err != nil {
 		// The pod was deleted meanwhile: its runner would stay registered.
 		c.removeRunner(q.Repo, jit.RunnerID)
 		c.forgetPod(name)
@@ -827,7 +827,7 @@ func (c *Controller) assignWarm(ctx context.Context, q catalog.Queue, id int, p 
 		}
 		break
 	}
-	if err := c.cfg.Mailbox.Deposit(p.Name, string(p.UID), payload); err != nil {
+	if err := c.cfg.Mailbox.Deposit(p.Name, string(p.UID), c.servedBy(payload)); err != nil {
 		// The pod was deleted meanwhile: its runner would stay registered.
 		c.removeRunner(q.Repo, jit.RunnerID)
 		c.forgetPod(p.Name)
@@ -1040,3 +1040,23 @@ func isDispatcherRunner(name string) bool {
 }
 
 var _ sessions.Handler = (*Controller)(nil)
+
+// DispatcherImageEnv names, in the runner environment, the image of the
+// dispatcher that served the job: an acceptance job proves with it that it
+// was served by the candidate under test, not by a previous dispatcher. The
+// agent drops CI_DISPATCHER_* variables, hence the name.
+const DispatcherImageEnv = "DISPATCHER_IMAGE"
+
+// servedBy adds the dispatcher image to a claim, cold and warm pods alike.
+func (c *Controller) servedBy(p claim.Payload) claim.Payload {
+	if c.cfg.AgentImage == "" {
+		return p
+	}
+	env := maps.Clone(p.Env)
+	if env == nil {
+		env = map[string]string{}
+	}
+	env[DispatcherImageEnv] = c.cfg.AgentImage
+	p.Env = env
+	return p
+}

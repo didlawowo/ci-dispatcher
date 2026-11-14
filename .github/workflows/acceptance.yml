@@ -4,11 +4,11 @@ name: acceptance
 # synchronously by cd.yml before any promotion.
 #
 # The candidate (namespace ci-dispatcher-acceptance) serves one queue of this
-# repository, ci-acceptance, and nothing else. Its catalog gives every runner
-# CI_DISPATCHER_CANDIDATE=<version>@<digest> (acceptance/values.yaml, written by
-# cd.yml); the dispatcher hands it over in the pod spec or, for a warm pod, in
-# the claim. Every job below checks it: a job served by the previous
-# candidate, still running while the new pod fails to start, fails.
+# repository, ci-acceptance, and nothing else. The dispatcher hands every
+# runner it serves, cold or warm pod, DISPATCHER_IMAGE: its own image,
+# repository@digest. Every job below compares it with the published digest: a
+# job served by the previous candidate, still running while the new pod fails
+# to start, fails.
 #
 # What it proves: the candidate starts, reads its GitHub secret, opens its
 # session, gets runners registered (cold pods and its warm pod) and serves
@@ -25,7 +25,7 @@ on:
         required: true
         type: string
       candidate:
-        description: "Expected CI_DISPATCHER_CANDIDATE (<version>@<digest>)"
+        description: "Expected DISPATCHER_IMAGE (repository@digest of the candidate)"
         required: true
         type: string
 
@@ -35,7 +35,7 @@ permissions:
 jobs:
   # ArgoCD polls main every 3 minutes, then the candidate pod rolls out and
   # opens its session. A job queued before that is served by the previous
-  # candidate and fails its marker check.
+  # candidate and fails its image check.
   settle:
     runs-on: arc-runner-ci-dispatcher
     timeout-minutes: 10
@@ -106,9 +106,9 @@ jobs:
         env:
           EXPECTED: ${{ inputs.candidate }}
         run: |
-          echo "pod=$HOSTNAME candidate=${CI_DISPATCHER_CANDIDATE:-none}"
-          if [ "${CI_DISPATCHER_CANDIDATE:-}" != "$EXPECTED" ]; then
-            echo "::error::served by '${CI_DISPATCHER_CANDIDATE:-none}', expected the candidate $EXPECTED"
+          echo "pod=$HOSTNAME dispatcher=${DISPATCHER_IMAGE:-none}"
+          if [ "${DISPATCHER_IMAGE:-}" != "$EXPECTED" ]; then
+            echo "::error::served by '${DISPATCHER_IMAGE:-none}', expected the candidate $EXPECTED"
             exit 1
           fi
 
@@ -126,8 +126,8 @@ jobs:
         env:
           EXPECTED: ${{ inputs.candidate }}
         run: |
-          echo "pod=$HOSTNAME candidate=${CI_DISPATCHER_CANDIDATE:-none}"
-          [ "${CI_DISPATCHER_CANDIDATE:-}" = "$EXPECTED" ] || { echo "::error::served by '${CI_DISPATCHER_CANDIDATE:-none}', expected $EXPECTED"; exit 1; }
+          echo "pod=$HOSTNAME dispatcher=${DISPATCHER_IMAGE:-none}"
+          [ "${DISPATCHER_IMAGE:-}" = "$EXPECTED" ] || { echo "::error::served by '${DISPATCHER_IMAGE:-none}', expected $EXPECTED"; exit 1; }
           sleep 20
 
   report:

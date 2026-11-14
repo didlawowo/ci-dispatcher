@@ -216,8 +216,9 @@ A merge on main whose `ci-dispatcher` checks pass cuts a release
 2. writes the digest in `acceptance/values.yaml`: a candidate dispatcher,
    deployed apart with its own namespace, Lease and a catalog limited to the
    `ci-acceptance` queue of this repository, picks it up;
-3. runs `acceptance.yml`: real jobs on that queue, each checking that its pod
-   carries the candidate's agent;
+3. runs `acceptance.yml`: real jobs on that queue, each checking that
+   `DISPATCHER_IMAGE` (the image of the dispatcher that served it, given to
+   every runner in its claim) is the candidate's digest;
 4. green only, writes the digest in `charts/ci-dispatcher/values.yaml`, which
    production reads on main.
 

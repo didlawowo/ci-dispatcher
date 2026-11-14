@@ -3,8 +3,7 @@ name: cd
 # Delivery of a release tag (dispatcher-vX.Y.Z), dispatched by release.yml:
 #
 #   1. publish    image (amd64, arm64) and chart on ghcr.io, digest recorded;
-#   2. candidate  version and digest written in acceptance/values.yaml on main
-#                 (also handed to every runner as CI_DISPATCHER_CANDIDATE): ArgoCD
+#   2. candidate  version and digest written in acceptance/values.yaml on main: ArgoCD
 #                 (Application ci-dispatcher-acceptance, continuous-delivery)
 #                 deploys it in its own namespace, serving only the acceptance
 #                 queue of this repository;
@@ -157,7 +156,7 @@ jobs:
     uses: ./.github/workflows/acceptance.yml
     with:
       version: ${{ needs.publish.outputs.version }}
-      candidate: ${{ needs.publish.outputs.version }}@${{ needs.publish.outputs.digest }}
+      candidate: ghcr.io/didlawowo/ci-dispatcher@${{ needs.publish.outputs.digest }}
 
   promote:
     needs: [publish, acceptance]

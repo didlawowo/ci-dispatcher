@@ -52,7 +52,8 @@ case "$mode" in
       [ "$sha" = "$target" ] && exit 0
       is_bot_values "$sha" || exit 1
       sha=$(git rev-parse "$sha^")
-    done ;;
+    done
+    exit 1 ;;
   *) echo "ERREUR: unknown mode $mode" >&2; exit 2 ;;
 esac
 echo "ERREUR: no validated commit within 30 ancestors" >&2

@@ -3,12 +3,10 @@ name: ci-dispatcher
 on:
   push:
     branches: [main]
-    tags: ["dispatcher-v*"]
   pull_request:
 
-# Read-only by default; only the publish job, on a dispatcher-v* tag, may
-# write packages. Pull requests from outside forks get this read-only token
-# and no secret.
+# Read-only. Pull requests from outside forks get this token and no secret.
+# A green run on main triggers release.yml; the image is published by cd.yml.
 permissions:
   contents: read
 
@@ -25,8 +23,6 @@ env:
 
 jobs:
   go:
-    # A release tag points at a commit already validated on main.
-    if: github.ref_type != 'tag'
     runs-on: arc-runner-ci-dispatcher
     steps:
       - uses: actions/checkout@v7
@@ -52,7 +48,6 @@ jobs:
         run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" . ./listener/... ./dispatcher/... ./cmd/...
 
   chart:
-    if: github.ref_type != 'tag'
     runs-on: arc-runner-ci-dispatcher
     steps:
       - uses: actions/checkout@v7
@@ -67,7 +62,6 @@ jobs:
           helm template ci-dispatcher charts/ci-dispatcher --namespace ci-runners > /dev/null
 
   secrets:
-    if: github.ref_type != 'tag'
     runs-on: arc-runner-ci-dispatcher
     steps:
       - uses: actions/checkout@v7
@@ -79,7 +73,6 @@ jobs:
           /tmp/gitleaks git --redact --no-banner --config .gitleaks.toml --exit-code 1 .
 
   image:
-    if: github.ref_type != 'tag'
     needs: [go, chart]
     runs-on: arc-runner-ci-dispatcher
     steps:
@@ -104,57 +97,3 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-
-  publish:
-    if: startsWith(github.ref, 'refs/tags/dispatcher-v')
-    runs-on: arc-runner-ci-dispatcher
-    permissions:
-      contents: read
-      packages: write
-      actions: read
-    steps:
-      - uses: actions/checkout@v7
-      # The checks are not rerun on a tag: the tagged commit must already have
-      # a successful run of this workflow on main.
-      # Only a push run counts: a fork pull request from its own "main" branch
-      # also reports head_branch=main. Waits for a main run still in progress.
-      - name: tagged commit validated on main
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/ci-dispatcher.yml/runs?branch=main&event=push&head_sha=$GITHUB_SHA&status=success&per_page=1"
-          for _ in $(seq 1 40); do
-            runs=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$url" \
-              | grep -o '"total_count": *[0-9]*' | grep -o '[0-9]*$' || true)
-            if [ "${runs:-0}" -ge 1 ]; then exit 0; fi
-            sleep 30
-          done
-          echo "::error::$GITHUB_SHA has no successful ci-dispatcher push run on main"
-          exit 1
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: version from the tag
-        run: echo "VERSION=${GITHUB_REF_NAME#dispatcher-v}" >> "$GITHUB_ENV"
-      - name: push the image
-        run: |
-          docker buildx build -f docker/Dockerfile.dispatcher \
-            --platform linux/amd64,linux/arm64 \
-            -t "${IMAGE}:${VERSION}" --push .
-      - name: install helm
-        run: |
-          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar -xz -C /tmp linux-amd64/helm
-          install -D /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: push the chart
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          helm package charts/ci-dispatcher --version "$VERSION" --app-version "$VERSION" -d /tmp/chart
-          helm push "/tmp/chart/ci-dispatcher-${VERSION}.tgz" "$CHART_REPO"

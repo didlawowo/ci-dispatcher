@@ -207,8 +207,22 @@ Nothing else.
 
 ## Releases
 
-A `dispatcher-vX.Y.Z` tag publishes `ghcr.io/didlawowo/ci-dispatcher:X.Y.Z`
-(amd64, arm64) and the chart `oci://ghcr.io/didlawowo/charts/ci-dispatcher`.
+A merge on main whose `ci-dispatcher` checks pass cuts a release
+(`release.yml`: conventional commits, `cliff.toml`, tag `dispatcher-vX.Y.Z`).
+`cd.yml` then delivers that tag:
+
+1. publishes `ghcr.io/didlawowo/ci-dispatcher:X.Y.Z` (amd64, arm64) and the
+   chart `oci://ghcr.io/didlawowo/charts/ci-dispatcher`;
+2. writes the digest in `acceptance/values.yaml`: a candidate dispatcher,
+   deployed apart with its own namespace, Lease and a catalog limited to the
+   `ci-acceptance` queue of this repository, picks it up;
+3. runs `acceptance.yml`: real jobs on that queue, each checking that its pod
+   carries the candidate's agent;
+4. green only, writes the digest in `charts/ci-dispatcher/values.yaml`, which
+   production reads on main.
+
+A failed acceptance leaves production on the last validated digest. Rollback:
+revert the promote commit. Nobody tags by hand.
 
 ## Limits
 

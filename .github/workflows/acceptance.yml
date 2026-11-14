@@ -1,0 +1,99 @@
+name: acceptance
+
+# Acceptance of a ci-dispatcher candidate with real GitHub jobs, called
+# synchronously by cd.yml before any promotion.
+#
+# The candidate (namespace ci-dispatcher-acceptance) serves one queue of this
+# repository, ci-acceptance, and nothing else. Every job below runs on that
+# queue and checks that the agent copied into its pod is the candidate's
+# (fingerprint computed by cd.yml from the published image): a job taken by a
+# previous candidate fails.
+#
+# What it proves: the candidate starts, reads its GitHub secret, opens its
+# session, creates runner pods that register and run jobs, takes several jobs
+# at once and serves them from its warm pod. What it does not prove: the
+# docker profile (this repository is public, so the public profile serves it),
+# the recreation of a deleted queue and the restart of the dispatcher (no
+# cluster access from a public repository's runner); those stay covered by
+# the Go tests.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Candidate version (X.Y.Z)"
+        required: true
+        type: string
+      agent_sha256:
+        description: "sha256 of /ci-runner-agent in the candidate image (amd64)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ArgoCD polls main every 3 minutes, then the candidate pod rolls out and
+  # opens its session. A job queued before that would be taken by the previous
+  # candidate and fail its fingerprint check.
+  settle:
+    runs-on: arc-runner-ci-dispatcher
+    timeout-minutes: 10
+    steps:
+      - name: wait for the candidate rollout
+        run: sleep 300
+
+  # A cold or warm pod of the candidate takes one job.
+  single:
+    needs: settle
+    runs-on: ci-acceptance
+    timeout-minutes: 15
+    steps:
+      - name: job runs on a pod of the candidate
+        env:
+          EXPECTED: ${{ inputs.agent_sha256 }}
+        run: |
+          actual=$(sha256sum /agent-bin/ci-runner-agent | cut -d' ' -f1)
+          echo "pod=$HOSTNAME agent=$actual"
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::agent $actual is not the candidate's $EXPECTED: an older dispatcher took the job"
+            exit 1
+          fi
+
+  # Three jobs at once: the candidate scales out and forgets none.
+  parallel:
+    needs: single
+    runs-on: ci-acceptance
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3]
+    steps:
+      - name: job ${{ matrix.job }} runs on a pod of the candidate
+        env:
+          EXPECTED: ${{ inputs.agent_sha256 }}
+        run: |
+          actual=$(sha256sum /agent-bin/ci-runner-agent | cut -d' ' -f1)
+          echo "pod=$HOSTNAME agent=$actual"
+          [ "$actual" = "$EXPECTED" ] || { echo "::error::agent $actual is not the candidate's $EXPECTED"; exit 1; }
+          sleep 20
+
+  report:
+    needs: [single, parallel]
+    if: always()
+    runs-on: arc-runner-ci-dispatcher
+    timeout-minutes: 5
+    steps:
+      - name: summary
+        env:
+          VERSION: ${{ inputs.version }}
+          SINGLE: ${{ needs.single.result }}
+          PARALLEL: ${{ needs.parallel.result }}
+        run: |
+          {
+            echo "## Acceptance of ci-dispatcher $VERSION"
+            echo "- one job on the candidate: $SINGLE"
+            echo "- three simultaneous jobs: $PARALLEL"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$SINGLE" = success ] && [ "$PARALLEL" = success ]

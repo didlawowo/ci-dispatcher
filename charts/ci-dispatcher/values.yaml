@@ -1,9 +1,12 @@
 # -- Image of the dispatcher; it also carries ci-runner-agent, copied into
 # every runner pod by an init container. Pin a digest in production.
+# tag and digest are the PRODUCTION image: only the promote job of cd.yml
+# writes them, after a green acceptance of the candidate (acceptance/values.yaml).
+# An empty tag defaults to the chart appVersion; the digest wins when set.
 image:
   repository: ghcr.io/didlawowo/ci-dispatcher
-  tag: ""          # defaults to the chart appVersion
-  digest: ""       # sha256:..., preferred over the tag when set
+  tag: "0.1.2"
+  digest: "sha256:45758ec14ae14da4a47b015d096fb61c4719a7c9d368660457b1c665ab6b9802"
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 

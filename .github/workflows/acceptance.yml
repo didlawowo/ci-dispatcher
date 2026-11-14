@@ -9,6 +9,8 @@ name: acceptance
 # repository@digest. Every job below compares it with the published digest: a
 # job served by the previous candidate, still running while the new pod fails
 # to start, fails.
+# A warm pod created by the previous candidate and adopted by this one passes:
+# the check proves the dispatcher that served the job, not the agent binary.
 #
 # What it proves: the candidate starts, reads its GitHub secret, opens its
 # session, gets runners registered (cold pods and its warm pod) and serves

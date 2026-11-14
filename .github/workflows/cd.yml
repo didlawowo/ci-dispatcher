@@ -3,7 +3,8 @@ name: cd
 # Delivery of a release tag (dispatcher-vX.Y.Z), dispatched by release.yml:
 #
 #   1. publish    image (amd64, arm64) and chart on ghcr.io, digest recorded;
-#   2. candidate  digest written in acceptance/values.yaml on main: ArgoCD
+#   2. candidate  version and digest written in acceptance/values.yaml on main
+#                 (also handed to every runner as CI_DISPATCHER_CANDIDATE): ArgoCD
 #                 (Application ci-dispatcher-acceptance, continuous-delivery)
 #                 deploys it in its own namespace, serving only the acceptance
 #                 queue of this repository;
@@ -12,7 +13,9 @@ name: cd
 #                 on main; the production Application follows the chart on main.
 #
 # A failed acceptance stops here: production keeps the last validated digest.
-# Rollback: revert the promote commit on main.
+# Rollback: revert the promote commit on main. A delivery that failed for an
+# external reason (candidate not deployed, night) is replayed by running this
+# workflow again with the same tag.
 
 on:
   push:
@@ -49,12 +52,11 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
       digest: ${{ steps.push.outputs.digest }}
-      agent_sha256: ${{ steps.agent.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
-          fetch-depth: 2
+          fetch-depth: 40
 
       - name: version from the tag
         id: version
@@ -67,31 +69,13 @@ jobs:
           [ "$declared" = "$version" ] || { echo "::error::tag $version but Chart.yaml appVersion $declared"; exit 1; }
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
-      # The checks are not rerun on a tag. The tagged commit is either a commit
-      # with a successful push run of ci-dispatcher.yml on main, or the release
-      # commit of release.yml: its parent passed, and it only changes the
-      # CHANGELOG and the chart version.
+      # The checks are not rerun on a tag: the tagged commit, or the commit
+      # below the release, candidate and promotion commits written by the
+      # delivery itself, must have a successful push run of ci-dispatcher.yml.
       - name: tagged commit validated on main
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          validated() {
-            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-dispatcher.yml/runs?branch=main&event=push&head_sha=$1&status=success&per_page=1" --jq .total_count
-          }
-          sha=$(git rev-parse HEAD)
-          if [ "$(validated "$sha")" -ge 1 ]; then exit 0; fi
-          if git log -1 --format=%s | grep -Eq '^chore\(release\): dispatcher-v[0-9.]+ '; then
-            others=$(git diff --name-only HEAD^ HEAD | grep -vxE 'CHANGELOG.md|charts/ci-dispatcher/Chart.yaml' || true)
-            if [ -n "$others" ]; then
-              echo "::error::release commit $sha changes more than its version files: $others"
-              exit 1
-            fi
-            if [ "$(validated "$(git rev-parse HEAD^)")" -ge 1 ]; then exit 0; fi
-          fi
-          echo "::error::$sha has no successful ci-dispatcher push run on main"
-          exit 1
+        run: .github/scripts/delivery-ancestor.sh validated HEAD
 
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
@@ -115,21 +99,6 @@ jobs:
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest in the build metadata"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "Image ${IMAGE}:${VERSION} = $digest" >> "$GITHUB_STEP_SUMMARY"
-
-      # Fingerprint of the agent copied into every runner pod (amd64 nodes):
-      # an acceptance job proves it ran on a pod of this candidate by
-      # comparing it with its own copy.
-      - name: agent fingerprint
-        id: agent
-        shell: bash
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          set -euo pipefail
-          id=$(docker create --platform linux/amd64 "${IMAGE}@${DIGEST}")
-          docker cp "$id:/ci-runner-agent" /tmp/ci-runner-agent
-          docker rm "$id" > /dev/null
-          echo "sha256=$(sha256sum /tmp/ci-runner-agent | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: install helm
         run: |
@@ -182,10 +151,13 @@ jobs:
 
   acceptance:
     needs: [publish, candidate]
+    permissions:
+      contents: read
+      actions: write # the guard cancels a run whose jobs find no candidate
     uses: ./.github/workflows/acceptance.yml
     with:
       version: ${{ needs.publish.outputs.version }}
-      agent_sha256: ${{ needs.publish.outputs.agent_sha256 }}
+      candidate: ${{ needs.publish.outputs.version }}@${{ needs.publish.outputs.digest }}
 
   promote:
     needs: [publish, acceptance]

@@ -3,9 +3,10 @@
 
 usage: set-image.py [--no-downgrade] <values.yaml> <X.Y.Z> <sha256:...>
 
-Only the two lines under the top-level `image:` key change; comments and
-every other value are kept. With --no-downgrade, a version older than the
-one already written leaves the file untouched.
+Only the two lines under the top-level `image:` key change, plus the
+CI_DISPATCHER_CANDIDATE marker (<version>@<digest>) when the file has one;
+comments and every other value are kept. With --no-downgrade, a version older
+than the one already written leaves the file untouched.
 """
 
 import re
@@ -46,5 +47,7 @@ if no_downgrade and re.fullmatch(r"\d+\.\d+\.\d+", current.group(2)):
 
 body = tag_line.sub(rf'\g<1>"{version}"', body, count=1)
 body = digest_line.sub(rf'\g<1>"{digest}"', body, count=1)
-path.write_text(src[: block.start(1)] + body + src[block.end(1) :], encoding="utf-8")
+out = src[: block.start(1)] + body + src[block.end(1) :]
+out = re.sub(r'^(\s+CI_DISPATCHER_CANDIDATE: )"[^"]*"', rf'\g<1>"{version}@{digest}"', out, flags=re.MULTILINE)
+path.write_text(out, encoding="utf-8")
 print(f"{path}: image {version} {digest}")

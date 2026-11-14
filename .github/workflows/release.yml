@@ -33,7 +33,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  # The commit to release: the one whose checks passed, or the tip of main
+  # when only candidate and promotion commits of cd.yml landed on top of it
+  # meanwhile (otherwise the push of the release commit would be refused and
+  # the merge never released). Any other newer commit has its own run.
+  base:
     # Only a successful push run of this repository's main: a fork pull
     # request from its own "main" branch also reports head_branch=main.
     if: >-
@@ -41,12 +45,37 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: arc-runner-ci-dispatcher
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.base.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 40
+      - id: base
+        env:
+          VALIDATED: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          tip=$(git rev-parse HEAD)
+          if .github/scripts/delivery-ancestor.sh reaches "$tip" "$VALIDATED"; then
+            echo "sha=$tip" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$VALIDATED" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: base
     uses: didlawowo/workflow-ci/.github/workflows/release.yml@v1.22.6
     with:
       workflow-ci-ref: v1.22.6
-      # The commit whose checks passed; a newer main makes the push fail
-      # safely instead of releasing untested code.
-      validated-sha: ${{ github.event.workflow_run.head_sha || github.sha }}
+      # A newer main than this commit makes the push fail safely instead of
+      # releasing untested code.
+      validated-sha: ${{ needs.base.outputs.sha }}
       version-files: |
         charts/ci-dispatcher/Chart.yaml:^version: (.+)$
         charts/ci-dispatcher/Chart.yaml:^appVersion: "(.+)"$

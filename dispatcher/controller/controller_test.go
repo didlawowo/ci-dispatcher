@@ -196,13 +196,13 @@ func TestRunnerCreationBackoffSchedule(t *testing.T) {
 }
 
 func TestServedByAddsTheDispatcherImageWithoutMutatingTheClaim(t *testing.T) {
-	c := New(Config{AgentImage: "registry/dispatcher@sha256:abc", Metrics: metrics.New()})
+	c := &Controller{cfg: Config{AgentImage: "registry/dispatcher@sha256:abc"}}
 	in := claim.Payload{Env: map[string]string{"GOCACHE": "/c"}}
 	out := c.servedBy(in)
 	if out.Env[DispatcherImageEnv] != "registry/dispatcher@sha256:abc" || out.Env["GOCACHE"] != "/c" || len(in.Env) != 1 {
 		t.Fatalf("servedBy: in %v, out %v", in.Env, out.Env)
 	}
-	if got := New(Config{Metrics: metrics.New()}).servedBy(claim.Payload{}); got.Env != nil {
+	if got := (&Controller{}).servedBy(claim.Payload{}); got.Env != nil {
 		t.Fatalf("no agent image, env %v", got.Env)
 	}
 }

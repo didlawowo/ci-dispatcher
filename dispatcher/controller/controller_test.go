@@ -41,10 +41,15 @@ type testMailbox struct {
 	Mailbox
 	ready     time.Time
 	delivered chan string
+	payload   claim.Payload
 }
 
-func (m *testMailbox) Ready(string) (time.Time, bool)                { return m.ready, true }
-func (m *testMailbox) Deposit(name, _ string, _ claim.Payload) error { m.delivered <- name; return nil }
+func (m *testMailbox) Ready(string) (time.Time, bool) { return m.ready, true }
+func (m *testMailbox) Deposit(name, _ string, p claim.Payload) error {
+	m.payload = p
+	m.delivered <- name
+	return nil
+}
 
 func TestWarmRunnerAssignedAtFullCapacity(t *testing.T) {
 	labels := pods.Labels{Prefix: "example.com/ci"}
@@ -53,7 +58,7 @@ func TestWarmRunnerAssignedAtFullCapacity(t *testing.T) {
 	mailbox := &testMailbox{ready: now, delivered: make(chan string, 1)}
 	cat := &catalog.Catalog{Profiles: map[string]*catalog.Profile{"light": {Warm: 1, Nodes: []string{"node-a"}}}, Capacity: catalog.Capacity{Enforce: true, Nodes: map[string]catalog.NodeCapacity{"node-a": {Places: 1}}}}
 	q := catalog.Queue{Name: "queue", Repo: "repo", Profile: "light", MaxRunners: 1, Spec: cat.ProfileSpec("light")}
-	c := New(Config{Catalog: cat, Queues: []catalog.Queue{q}, API: testAPI{}, Pods: p, Mailbox: mailbox, Metrics: metrics.New(), Labels: labels, Now: func() time.Time { return now }})
+	c := New(Config{Catalog: cat, Queues: []catalog.Queue{q}, API: testAPI{}, Pods: p, Mailbox: mailbox, Metrics: metrics.New(), Labels: labels, AgentImage: "registry/dispatcher@sha256:abc", Now: func() time.Time { return now }})
 	c.OnScaleSet(q.Name, 1)
 	c.mu.Lock()
 	c.queues[q.Name].desired = 1
@@ -63,6 +68,9 @@ func TestWarmRunnerAssignedAtFullCapacity(t *testing.T) {
 	case name := <-mailbox.delivered:
 		if name != p.pod.Name {
 			t.Fatalf("assigned %q", name)
+		}
+		if got := mailbox.payload.Env[DispatcherImageEnv]; got != "registry/dispatcher@sha256:abc" {
+			t.Fatalf("claim names dispatcher image %q", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("warm pod was not assigned at full capacity")
@@ -184,5 +192,17 @@ func TestRunnerCreationBackoffSchedule(t *testing.T) {
 	c.provisionSucceeded(qs)
 	if qs.failures != 0 || !qs.retryAt.IsZero() {
 		t.Fatalf("success kept failures=%d retryAt=%v", qs.failures, qs.retryAt)
+	}
+}
+
+func TestServedByAddsTheDispatcherImageWithoutMutatingTheClaim(t *testing.T) {
+	c := &Controller{cfg: Config{AgentImage: "registry/dispatcher@sha256:abc"}}
+	in := claim.Payload{Env: map[string]string{"GOCACHE": "/c"}}
+	out := c.servedBy(in)
+	if out.Env[DispatcherImageEnv] != "registry/dispatcher@sha256:abc" || out.Env["GOCACHE"] != "/c" || len(in.Env) != 1 {
+		t.Fatalf("servedBy: in %v, out %v", in.Env, out.Env)
+	}
+	if got := (&Controller{}).servedBy(claim.Payload{}); got.Env != nil {
+		t.Fatalf("no agent image, env %v", got.Env)
 	}
 }

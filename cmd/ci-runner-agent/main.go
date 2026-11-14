@@ -244,25 +244,47 @@ func runRunner(log *slog.Logger, p *claim.Payload, stateDir string) int {
 		log.Error("runner not started", "command", command, "error", err)
 		return 1
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	ws, err := waitRunner(cmd.Process.Pid, sigs, func(s os.Signal) { _ = cmd.Process.Signal(s) })
+	if err != nil {
+		log.Error("runner failed", "error", err)
+		return 1
+	}
+	if ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return ws.ExitStatus()
+}
+
+// waitRunner waits for the runner and reaps every other child meanwhile. The
+// agent is PID 1 of the runner container: job processes orphaned by a kill are
+// re-parented to it and would stay zombies, still visible to kill(pid, 0)
+// (ARC's bash reaped them). cmd.Wait is not used: wait4(-1) would steal its
+// status. A first pass runs before any SIGCHLD, so an early exit is not missed.
+func waitRunner(pid int, sigs <-chan os.Signal, forward func(os.Signal)) (syscall.WaitStatus, error) {
+	chld := make(chan os.Signal, 1)
+	signal.Notify(chld, syscall.SIGCHLD)
+	defer signal.Stop(chld)
 	for {
-		select {
-		case s := <-sigs:
-			_ = cmd.Process.Signal(s)
-		case err := <-done:
-			var exit *exec.ExitError
-			if errors.As(err, &exit) {
-				if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-					return 128 + int(ws.Signal())
-				}
-				return exit.ExitCode()
+		for {
+			var ws syscall.WaitStatus
+			got, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
+			if errors.Is(err, syscall.EINTR) {
+				continue
 			}
 			if err != nil {
-				log.Error("runner failed", "error", err)
-				return 1
+				return 0, fmt.Errorf("wait for runner: %w", err)
 			}
-			return 0
+			if got == pid {
+				return ws, nil
+			}
+			if got <= 0 {
+				break
+			}
+		}
+		select {
+		case s := <-sigs:
+			forward(s)
+		case <-chld:
 		}
 	}
 }

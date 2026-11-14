@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -56,7 +58,7 @@ exit 0
 
 	got := Run(discardLogger(), cmd, make(chan os.Signal, 1))
 	if got != 0 {
-		t.Fatal("orphan stayed a zombie")
+		t.Fatalf("Run returned %d, want 0: the orphan stayed a zombie", got)
 	}
 }
 
@@ -85,7 +87,7 @@ func TestRunReportsASignalAs128PlusSignal(t *testing.T) {
 func TestRunForwardsSignals(t *testing.T) {
 	setSubreaper(t)
 
-	cmd := script(t, `trap 'exit 5' TERM; echo ready > "$dir/ready"; while :; do sleep 0.1; done`)
+	cmd := script(t, `trap 'exit 5' TERM; echo $$ > "$dir/ready"; while :; do sleep 0.1; done`)
 
 	dir := filepath.Dir(cmd.Path)
 	cmd.Env = append(os.Environ(), "dir="+dir)
@@ -98,6 +100,14 @@ func TestRunForwardsSignals(t *testing.T) {
 	}()
 
 	ready := filepath.Join(dir, "ready")
+	// A failed run must not leave the script looping after the test.
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(ready); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(ready); err == nil {

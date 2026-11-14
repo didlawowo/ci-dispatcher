@@ -72,3 +72,15 @@ func TestRunRunnerKeepsTheRunnerExitCode(t *testing.T) {
 		t.Errorf("runRunner returned %d, want 7", got)
 	}
 }
+
+func TestRunRunnerReportsASignalAs128PlusSignal(t *testing.T) {
+	setSubreaper(t)
+	scriptPath := filepath.Join(t.TempDir(), "runner.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nkill -TERM $$\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	t.Setenv("RUNNER_CMD", scriptPath)
+	if got := runRunner(slog.New(slog.NewTextHandler(io.Discard, nil)), &claim.Payload{JITConfig: "x"}, ""); got != 128+15 {
+		t.Errorf("runRunner returned %d, want %d", got, 128+15)
+	}
+}

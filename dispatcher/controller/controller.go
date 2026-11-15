@@ -839,7 +839,11 @@ func (c *Controller) assignWarm(ctx context.Context, q catalog.Queue, id int, p 
 
 // scaleDown removes idle surplus runners: registered, not busy and assigned
 // for a while (a runner just assigned may be about to receive its job).
+// GitHub is asked which runners are busy first: an idle minRunners pod that
+// just took a job still carries the assigned label until JobStarted is
+// handled, and RemoveRunner does not always refuse a runner with a job.
 func (c *Controller) scaleDown(ctx context.Context, qs *queueState, ps []*corev1.Pod, n int, now time.Time) {
+	var busy map[int64]bool
 	for _, p := range ps {
 		if n == 0 {
 			return
@@ -852,6 +856,20 @@ func (c *Controller) scaleDown(ctx context.Context, qs *queueState, ps []*corev1
 			continue
 		}
 		if id, err := strconv.ParseInt(p.Annotations[c.cfg.Labels.RunnerIDAnnotation()], 10, 64); err == nil {
+			if busy == nil {
+				runners, err := c.cfg.API.ListRunners(ctx, qs.q.Repo)
+				if err != nil {
+					c.log.Warn("scale down skipped: runners not listed", "queue", qs.q.Name, "error", err)
+					return
+				}
+				busy = map[int64]bool{}
+				for _, r := range runners {
+					busy[r.ID] = r.Busy
+				}
+			}
+			if busy[id] {
+				continue
+			}
 			rmCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			err := c.cfg.API.RemoveRunner(rmCtx, qs.q.Repo, id)
 			cancel()

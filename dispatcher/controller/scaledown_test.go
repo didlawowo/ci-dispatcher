@@ -65,3 +65,16 @@ func TestCompletedJobPodIsNotCountedAsActive(t *testing.T) {
 		t.Fatalf("%d runner(s) actif(s), attendu 1 (le pod au job terminé ne compte plus)", got)
 	}
 }
+
+// Comme ARC : minRunners runners libres en plus des jobs attribués.
+func TestDesiredKeepsMinRunnersIdleOnTopOfAssignedJobs(t *testing.T) {
+	cfg, q := newColdTestConfig(t, &scaleDownAPI{}, &scaleDownPods{}, &coldTestMailbox{}, "registry/dispatcher@sha256:abc")
+	c := New(cfg)
+	c.queues[q.Name].q.MinRunners, c.queues[q.Name].q.MaxRunners = 2, 7
+	for jobs, want := range map[int]int{0: 2, 1: 3, 6: 7} {
+		c.OnStatistics(q.Name, &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: jobs})
+		if got := c.queues[q.Name].desired; got != want {
+			t.Errorf("%d job(s) : desired = %d, attendu %d", jobs, got, want)
+		}
+	}
+}

@@ -201,7 +201,9 @@ func (c *Controller) OnScaleSet(queue string, id int) {
 }
 
 // OnStatistics implements sessions.Handler: the wanted runner count is the
-// assigned jobs, bounded by maxRunners, with minRunners as a floor.
+// assigned jobs plus minRunners idle runners, bounded by maxRunners, as ARC
+// does. With max(jobs, minRunners), a job landing on an idle runner left a
+// surplus that scaleDown removed and the next statistics recreated.
 func (c *Controller) OnStatistics(queue string, st *scaleset.RunnerScaleSetStatistic) {
 	c.mu.Lock()
 	qs, ok := c.queues[queue]
@@ -209,7 +211,7 @@ func (c *Controller) OnStatistics(queue string, st *scaleset.RunnerScaleSetStati
 		c.mu.Unlock()
 		return
 	}
-	desired := min(max(st.TotalAssignedJobs, qs.q.MinRunners), qs.q.MaxRunners)
+	desired := min(st.TotalAssignedJobs+qs.q.MinRunners, qs.q.MaxRunners)
 	changed := desired != qs.desired
 	qs.desired = desired
 	q := qs.q

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/dispatcher/gh"
 	"github.com/actions/scaleset/dispatcher/pods"
 	corev1 "k8s.io/api/core/v1"
@@ -48,5 +49,19 @@ func TestScaleDownSparesARunnerGitHubReportsBusy(t *testing.T) {
 			t.Fatalf("busy=%v : %d pod(s) supprimé(s), %d RemoveRunner, attendu %d", busy, len(podAPI.deleted), len(api.removeCalls), want)
 		}
 		podAPI.deleted = nil
+	}
+}
+
+// Un pod dont le job est terminé ne compte plus comme runner actif : sinon la
+// fin d'un job crée un faux surplus qui vise le runner libre.
+func TestCompletedJobPodIsNotCountedAsActive(t *testing.T) {
+	cfg, _ := newColdTestConfig(t, &scaleDownAPI{}, &scaleDownPods{}, &coldTestMailbox{}, "registry/dispatcher@sha256:abc")
+	c := New(cfg)
+	pod := func(name string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{cfg.Labels.ScaleSetID(): "4"}}}
+	}
+	c.OnJobCompleted("q", &scaleset.JobCompleted{RunnerName: "ci-docker-done"})
+	if got := len(c.queueRunners([]*corev1.Pod{pod("ci-docker-done"), pod("ci-docker-idle")})[4]); got != 1 {
+		t.Fatalf("%d runner(s) actif(s), attendu 1 (le pod au job terminé ne compte plus)", got)
 	}
 }

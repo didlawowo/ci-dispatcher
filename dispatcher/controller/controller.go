@@ -138,6 +138,7 @@ type Controller struct {
 	warmInfl  map[string]int       // profile → warm pods being created
 	pending   map[string]pendingPod
 	finishing map[string]time.Time // finished pod → last deletion attempt
+	done      map[string]bool      // pod whose job completed, until it is gone
 	started   time.Time
 }
 
@@ -161,6 +162,7 @@ func New(cfg Config) *Controller {
 		warmInfl:  map[string]int{},
 		pending:   map[string]pendingPod{},
 		finishing: map[string]time.Time{},
+		done:      map[string]bool{},
 	}
 	c.warm = warmpool.New(cfg.Labels, cfg.Mailbox.Ready)
 	for _, q := range cfg.Queues {
@@ -241,6 +243,12 @@ func (c *Controller) OnJobCompleted(queue string, j *scaleset.JobCompleted) {
 		return
 	}
 	name := j.RunnerName
+	// Its pod no longer serves the queue: counting it until it exits would
+	// make a surplus, and scaleDown would pick the idle runner that GitHub is
+	// handing the next job to.
+	c.mu.Lock()
+	c.done[name] = true
+	c.mu.Unlock()
 	time.AfterFunc(completedGrace, func() {
 		p, ok := c.cfg.Pods.Get(name)
 		if !ok || !isManaged(p) {
@@ -278,6 +286,7 @@ func (c *Controller) OnPod(p *corev1.Pod, deleted bool) {
 		delete(c.sources, p.Name)
 		delete(c.pending, p.Name)
 		delete(c.finishing, p.Name)
+		delete(c.done, p.Name)
 		c.mu.Unlock()
 		c.kick()
 		return
@@ -354,8 +363,10 @@ func (c *Controller) Run(ctx context.Context) {
 // queueRunners counts the live runner pods of every scale set.
 func (c *Controller) queueRunners(all []*corev1.Pod) map[int][]*corev1.Pod {
 	out := map[int][]*corev1.Pod{}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, p := range all {
-		if pods.Terminated(p) {
+		if pods.Terminated(p) || c.done[p.Name] {
 			continue
 		}
 		id, err := strconv.Atoi(p.Labels[c.cfg.Labels.ScaleSetID()])
@@ -857,8 +868,11 @@ func (c *Controller) scaleDown(ctx context.Context, qs *queueState, ps []*corev1
 		}
 		if id, err := strconv.ParseInt(p.Annotations[c.cfg.Labels.RunnerIDAnnotation()], 10, 64); err == nil {
 			if busy == nil {
-				runners, err := c.cfg.API.ListRunners(ctx, qs.q.Repo)
+				listCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				runners, err := c.cfg.API.ListRunners(listCtx, qs.q.Repo)
+				cancel()
 				if err != nil {
+					c.cfg.Metrics.PodErrors.WithLabelValues("list_runners").Inc()
 					c.log.Warn("scale down skipped: runners not listed", "queue", qs.q.Name, "error", err)
 					return
 				}

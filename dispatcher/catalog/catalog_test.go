@@ -210,6 +210,15 @@ func TestParseRefus(t *testing.T) {
 				return replaceOnce(t, src, "    nodes: [repo-node-a]", "    nodes: [repo-node-a]\n    kubeAPIToken: true")
 			},
 		},
+		{nom: "kubeAPIToken avec le SA du dispatcher", modifier: func(t *testing.T, src string) string {
+			return replaceOnce(t, src, "    nodes: [repo-node-a]", "    nodes: [repo-node-a]\n    serviceAccountName: ci-dispatcher\n    kubeAPIToken: true")
+		}},
+		{nom: "kubeAPIToken sur dépôt public", modifier: func(t *testing.T, src string) string {
+			return replaceOnce(t, src, "    nodes: [repo-node-a]", "    nodes: [repo-node-a]\n    visibility: public\n    serviceAccountName: ci-demo\n    kubeAPIToken: true")
+		}},
+		{nom: "kubeAPIToken sur profil public", modifier: func(t *testing.T, src string) string {
+			return replaceOnce(t, src, "    nodes: [repo-node-a]", "    nodes: [repo-node-a]\n    serviceAccountName: ci-demo\n    perProfile:\n      public: {kubeAPIToken: true}")
+		}},
 		{
 			nom: "nom de file dupliqué",
 			modifier: func(t *testing.T, src string) string {

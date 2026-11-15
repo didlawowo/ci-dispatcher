@@ -83,7 +83,10 @@ became ready; every 15 minutes, offline `ci-*` runners without a pod.
 ## Claim security
 
 - Runner pods get no API token (`automountServiceAccountToken: false`) but a
-  projected token of audience `ci-dispatcher`, valid 10 minutes.
+  projected token of audience `ci-dispatcher`, valid 10 minutes. A private
+  repository that declares `serviceAccountName` and `kubeAPIToken: true` gets
+  that account's API token (jobs that read the cluster, as under ARC); warm
+  pods and public repositories never do.
 - The dispatcher validates it with a `TokenReview`, reads the pod name and
   UID bound to the token and only answers for a pod of its namespace, with
   that UID and the label `app.kubernetes.io/managed-by: ci-dispatcher`.
@@ -133,7 +136,8 @@ fileNames: {docker: "runner-{repo}", light: "runner-{repo}-light", "*": "runner-
 Per repository (and per repository and profile under `perProfile`):
 `image`, `resources`, `dockerDataLimit`, `dindMemory`, `maxRunners`,
 `minRunners`, `nodes` (`["+node"]` adds, a plain list replaces),
-`preferNodes`, `serviceAccountName`, `cacheProfile` (`nfs` or `local`), `env`,
+`preferNodes`, `serviceAccountName`, `kubeAPIToken` (mounts that service
+account's API token, private repositories only), `cacheProfile` (`nfs` or `local`), `env`,
 `profiles`, `fileNames`, `priority`, `name` (exact GitHub name when it differs
 from the key).
 

@@ -205,6 +205,12 @@ func TestParseRefus(t *testing.T) {
 			},
 		},
 		{
+			nom: "kubeAPIToken sans serviceAccountName",
+			modifier: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "    nodes: [repo-node-a]", "    nodes: [repo-node-a]\n    kubeAPIToken: true")
+			},
+		},
+		{
 			nom: "nom de file dupliqué",
 			modifier: func(t *testing.T, src string) string {
 				return replaceOnce(t, src, "  case-repo:\n    fileNames:\n      docker: CustomName", "  case-repo:\n    fileNames:\n      docker: CustomName\n  dup-repo:\n    fileNames:\n      docker: CustomName")

@@ -281,6 +281,12 @@ func TestInvariantsDeBase(t *testing.T) {
 		t.Fatalf("automountServiceAccountToken = %v, attendu false", *pod.Spec.AutomountServiceAccountToken)
 	}
 
+	q.Spec.KubeAPIToken, q.Spec.ServiceAccountName = true, "ci-demo"
+	withToken, err := newRenderer(t, cat).Render(requestForQueue(cat, q))
+	if err != nil || !*withToken.Spec.AutomountServiceAccountToken || withToken.Spec.ServiceAccountName != "ci-demo" {
+		t.Fatalf("kubeAPIToken : jeton non monté (err %v)", err)
+	}
+
 	if len(pod.Spec.InitContainers) == 0 {
 		t.Fatalf("aucun init container")
 	}

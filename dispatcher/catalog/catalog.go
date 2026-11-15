@@ -192,17 +192,21 @@ type Defaults struct {
 
 // Override holds the per-repository (or per repository and profile) knobs.
 type Override struct {
-	Image              string            `json:"image,omitempty"`
-	Resources          *Resources        `json:"resources,omitempty"`
-	DockerDataLimit    string            `json:"dockerDataLimit,omitempty"`
-	MaxRunners         *int              `json:"maxRunners,omitempty"`
-	MinRunners         *int              `json:"minRunners,omitempty"`
-	Nodes              []string          `json:"nodes,omitempty"`
-	PreferNodes        []string          `json:"preferNodes,omitempty"`
-	ServiceAccountName string            `json:"serviceAccountName,omitempty"`
-	CacheProfile       string            `json:"cacheProfile,omitempty"`
-	DinDMemory         string            `json:"dindMemory,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
+	Image              string     `json:"image,omitempty"`
+	Resources          *Resources `json:"resources,omitempty"`
+	DockerDataLimit    string     `json:"dockerDataLimit,omitempty"`
+	MaxRunners         *int       `json:"maxRunners,omitempty"`
+	MinRunners         *int       `json:"minRunners,omitempty"`
+	Nodes              []string   `json:"nodes,omitempty"`
+	PreferNodes        []string   `json:"preferNodes,omitempty"`
+	ServiceAccountName string     `json:"serviceAccountName,omitempty"`
+	// KubeAPIToken mounts the service account's API token in the runner, as
+	// ARC did, for jobs that read the cluster (kubectl, helm). Private
+	// repositories only, and only with serviceAccountName.
+	KubeAPIToken bool              `json:"kubeAPIToken,omitempty"`
+	CacheProfile string            `json:"cacheProfile,omitempty"`
+	DinDMemory   string            `json:"dindMemory,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
 }
 
 // Repo is a repository entry.
@@ -577,6 +581,12 @@ func (c *Catalog) validateRepo(key string, r *Repo) []error {
 		}
 		if _, _, err := applyNodes(nil, o.Nodes); err != nil {
 			add("%s%v", where, err)
+		}
+		if o.KubeAPIToken && o.ServiceAccountName == "" && r.ServiceAccountName == "" {
+			add("%skubeAPIToken requires serviceAccountName", where)
+		}
+		if o.KubeAPIToken && r.Visibility == "public" {
+			add("%skubeAPIToken is refused for a public repository", where)
 		}
 	}
 	check("", r.Override)

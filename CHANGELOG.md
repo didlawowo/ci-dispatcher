@@ -4,6 +4,13 @@ All notable changes to ci-dispatcher are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 and follows the [Conventional Commits](https://www.conventionalcommits.org) spec.
 
+## [0.1.5] - 2026-11-15
+
+### Bug Fixes
+
+- *(controller)* Un redémarrage ne supprime plus les runners en cours (#14)
+
+
 ## [0.1.4] - 2026-11-15
 
 ### Bug Fixes

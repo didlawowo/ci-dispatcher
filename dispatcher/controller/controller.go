@@ -44,6 +44,9 @@ const (
 	lostMailboxMinAge  = 30 * time.Second
 	warmNotReadyMaxAge = 10 * time.Minute
 	scaleDownMinAge    = 2 * time.Minute
+	// apiCallTimeout bounds one GitHub call made from Reconcile: 20 s
+	// (a literal, no expression to mutate).
+	apiCallTimeout time.Duration = 20e9
 	// pendingMaxAge bounds how long a created or assigned pod is counted
 	// before the pod cache shows it.
 	pendingMaxAge = 2 * time.Minute
@@ -138,6 +141,7 @@ type Controller struct {
 	warmInfl  map[string]int       // profile → warm pods being created
 	pending   map[string]pendingPod
 	finishing map[string]time.Time // finished pod → last deletion attempt
+	done      map[string]bool      // pod whose job completed, until it is gone
 	started   time.Time
 }
 
@@ -161,6 +165,7 @@ func New(cfg Config) *Controller {
 		warmInfl:  map[string]int{},
 		pending:   map[string]pendingPod{},
 		finishing: map[string]time.Time{},
+		done:      map[string]bool{},
 	}
 	c.warm = warmpool.New(cfg.Labels, cfg.Mailbox.Ready)
 	for _, q := range cfg.Queues {
@@ -199,7 +204,9 @@ func (c *Controller) OnScaleSet(queue string, id int) {
 }
 
 // OnStatistics implements sessions.Handler: the wanted runner count is the
-// assigned jobs, bounded by maxRunners, with minRunners as a floor.
+// assigned jobs plus minRunners idle runners, bounded by maxRunners, as ARC
+// does. With max(jobs, minRunners), a job landing on an idle runner left a
+// surplus that scaleDown removed and the next statistics recreated.
 func (c *Controller) OnStatistics(queue string, st *scaleset.RunnerScaleSetStatistic) {
 	c.mu.Lock()
 	qs, ok := c.queues[queue]
@@ -207,7 +214,7 @@ func (c *Controller) OnStatistics(queue string, st *scaleset.RunnerScaleSetStati
 		c.mu.Unlock()
 		return
 	}
-	desired := min(max(st.TotalAssignedJobs, qs.q.MinRunners), qs.q.MaxRunners)
+	desired := min(st.TotalAssignedJobs+qs.q.MinRunners, qs.q.MaxRunners)
 	changed := desired != qs.desired
 	qs.desired = desired
 	q := qs.q
@@ -241,9 +248,19 @@ func (c *Controller) OnJobCompleted(queue string, j *scaleset.JobCompleted) {
 		return
 	}
 	name := j.RunnerName
+	// Its pod no longer serves the queue: counting it until it exits would
+	// make a surplus, and scaleDown would pick the idle runner that GitHub is
+	// handing the next job to.
+	c.mu.Lock()
+	c.done[name] = true
+	c.mu.Unlock()
 	time.AfterFunc(completedGrace, func() {
 		p, ok := c.cfg.Pods.Get(name)
 		if !ok || !isManaged(p) {
+			// Gone already, or not a dispatcher pod: no delete event will clear it.
+			c.mu.Lock()
+			delete(c.done, name)
+			c.mu.Unlock()
 			return
 		}
 		c.deletePod(context.Background(), p, "completed")
@@ -278,6 +295,7 @@ func (c *Controller) OnPod(p *corev1.Pod, deleted bool) {
 		delete(c.sources, p.Name)
 		delete(c.pending, p.Name)
 		delete(c.finishing, p.Name)
+		delete(c.done, p.Name)
 		c.mu.Unlock()
 		c.kick()
 		return
@@ -354,8 +372,10 @@ func (c *Controller) Run(ctx context.Context) {
 // queueRunners counts the live runner pods of every scale set.
 func (c *Controller) queueRunners(all []*corev1.Pod) map[int][]*corev1.Pod {
 	out := map[int][]*corev1.Pod{}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, p := range all {
-		if pods.Terminated(p) {
+		if pods.Terminated(p) || c.done[p.Name] {
 			continue
 		}
 		id, err := strconv.Atoi(p.Labels[c.cfg.Labels.ScaleSetID()])
@@ -839,7 +859,11 @@ func (c *Controller) assignWarm(ctx context.Context, q catalog.Queue, id int, p 
 
 // scaleDown removes idle surplus runners: registered, not busy and assigned
 // for a while (a runner just assigned may be about to receive its job).
+// GitHub is asked which runners are busy first: an idle minRunners pod that
+// just took a job still carries the assigned label until JobStarted is
+// handled, and RemoveRunner does not always refuse a runner with a job.
 func (c *Controller) scaleDown(ctx context.Context, qs *queueState, ps []*corev1.Pod, n int, now time.Time) {
+	var busy map[int64]bool
 	for _, p := range ps {
 		if n == 0 {
 			return
@@ -852,6 +876,23 @@ func (c *Controller) scaleDown(ctx context.Context, qs *queueState, ps []*corev1
 			continue
 		}
 		if id, err := strconv.ParseInt(p.Annotations[c.cfg.Labels.RunnerIDAnnotation()], 10, 64); err == nil {
+			if busy == nil {
+				listCtx, cancel := context.WithTimeout(ctx, apiCallTimeout)
+				runners, err := c.cfg.API.ListRunners(listCtx, qs.q.Repo)
+				cancel()
+				if err != nil {
+					c.cfg.Metrics.PodErrors.WithLabelValues("list_runners").Inc()
+					c.log.Warn("scale down skipped: runners not listed", "queue", qs.q.Name, "error", err)
+					return
+				}
+				busy = map[int64]bool{}
+				for _, r := range runners {
+					busy[r.ID] = r.Busy
+				}
+			}
+			if busy[id] {
+				continue
+			}
 			rmCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			err := c.cfg.API.RemoveRunner(rmCtx, qs.q.Repo, id)
 			cancel()

@@ -46,8 +46,8 @@ Only outbound connections: no webhook, no ingress.
 ## Runner pod life cycle
 
 1. A session reports `statistics.TotalAssignedJobs` for a queue. The wanted
-   runner count is that number, bounded by `maxRunners`, with `minRunners`
-   as a floor.
+   runner count is that number plus `minRunners` idle runners, bounded by
+   `maxRunners` (as ARC).
 2. For every missing runner the budget grants a place. The controller takes
    the oldest **ready** warm pod of the queue profile; without one, it
    creates a **cold** pod with the same template, the repository already

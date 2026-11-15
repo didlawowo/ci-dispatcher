@@ -44,8 +44,9 @@ const (
 	lostMailboxMinAge  = 30 * time.Second
 	warmNotReadyMaxAge = 10 * time.Minute
 	scaleDownMinAge    = 2 * time.Minute
-	// apiCallTimeout bounds one GitHub call made from Reconcile.
-	apiCallTimeout = 20 * time.Second
+	// apiCallTimeout bounds one GitHub call made from Reconcile: 20 s
+	// (a literal, no expression to mutate).
+	apiCallTimeout time.Duration = 20e9
 	// pendingMaxAge bounds how long a created or assigned pod is counted
 	// before the pod cache shows it.
 	pendingMaxAge = 2 * time.Minute

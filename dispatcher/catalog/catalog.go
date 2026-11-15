@@ -8,6 +8,7 @@ package catalog
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -192,17 +193,21 @@ type Defaults struct {
 
 // Override holds the per-repository (or per repository and profile) knobs.
 type Override struct {
-	Image              string            `json:"image,omitempty"`
-	Resources          *Resources        `json:"resources,omitempty"`
-	DockerDataLimit    string            `json:"dockerDataLimit,omitempty"`
-	MaxRunners         *int              `json:"maxRunners,omitempty"`
-	MinRunners         *int              `json:"minRunners,omitempty"`
-	Nodes              []string          `json:"nodes,omitempty"`
-	PreferNodes        []string          `json:"preferNodes,omitempty"`
-	ServiceAccountName string            `json:"serviceAccountName,omitempty"`
-	CacheProfile       string            `json:"cacheProfile,omitempty"`
-	DinDMemory         string            `json:"dindMemory,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
+	Image              string     `json:"image,omitempty"`
+	Resources          *Resources `json:"resources,omitempty"`
+	DockerDataLimit    string     `json:"dockerDataLimit,omitempty"`
+	MaxRunners         *int       `json:"maxRunners,omitempty"`
+	MinRunners         *int       `json:"minRunners,omitempty"`
+	Nodes              []string   `json:"nodes,omitempty"`
+	PreferNodes        []string   `json:"preferNodes,omitempty"`
+	ServiceAccountName string     `json:"serviceAccountName,omitempty"`
+	// KubeAPIToken mounts the service account's API token in the runner, as
+	// ARC did, for jobs that read the cluster (kubectl, helm). Private
+	// repositories only, and only with serviceAccountName.
+	KubeAPIToken bool              `json:"kubeAPIToken,omitempty"`
+	CacheProfile string            `json:"cacheProfile,omitempty"`
+	DinDMemory   string            `json:"dindMemory,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
 }
 
 // Repo is a repository entry.
@@ -578,9 +583,18 @@ func (c *Catalog) validateRepo(key string, r *Repo) []error {
 		if _, _, err := applyNodes(nil, o.Nodes); err != nil {
 			add("%s%v", where, err)
 		}
+		if sa := cmp.Or(o.ServiceAccountName, r.ServiceAccountName); o.KubeAPIToken && slices.Contains([]string{"", "default", "ci-dispatcher"}, sa) {
+			add("%skubeAPIToken requires the repository's own serviceAccountName (not default nor the dispatcher's)", where)
+		}
+		if o.KubeAPIToken && r.Visibility == "public" {
+			add("%skubeAPIToken is refused for a public repository", where)
+		}
 	}
 	check("", r.Override)
 	for p, o := range r.PerProfile {
+		if o.KubeAPIToken && c.Profiles[p] != nil && c.Profiles[p].Trust == TrustPublic {
+			add("perProfile %s: kubeAPIToken is refused on a public profile", p)
+		}
 		check("perProfile "+p+": ", o)
 	}
 	return errs

@@ -263,7 +263,10 @@ func applyInvariants(pod *corev1.Pod, req Request) error {
 		pod.Annotations[req.Labels.QueueAnnotation()] = req.Queue.Name
 	}
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
-	pod.Spec.AutomountServiceAccountToken = new(bool)
+	// No API token unless the repository asks for one with its own service
+	// account (private queues only: public overrides stop before it); warm
+	// pods never have one.
+	pod.Spec.AutomountServiceAccountToken = ptr(req.Queue != nil && req.Spec.KubeAPIToken && req.Spec.ServiceAccountName != "")
 
 	// The agent binary comes from the dispatcher image, copied into an
 	// emptyDir before every other init container.

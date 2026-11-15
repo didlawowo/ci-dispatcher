@@ -48,6 +48,7 @@ type PodSpec struct {
 	Tolerations        []Toleration
 	ImagePullSecrets   []string
 	ServiceAccountName string
+	KubeAPIToken       bool
 	CacheProfile       string
 	Env                map[string]string
 	Annotations        map[string]string
@@ -208,6 +209,9 @@ func (c *Catalog) resolveQueue(repo string, r *Repo, requested, used string) Que
 		}
 		if o.ServiceAccountName != "" {
 			s.ServiceAccountName = o.ServiceAccountName
+		}
+		if o.KubeAPIToken {
+			s.KubeAPIToken = true
 		}
 		if o.CacheProfile != "" {
 			s.CacheProfile = o.CacheProfile

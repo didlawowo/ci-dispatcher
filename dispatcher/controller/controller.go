@@ -254,6 +254,10 @@ func (c *Controller) OnJobCompleted(queue string, j *scaleset.JobCompleted) {
 	time.AfterFunc(completedGrace, func() {
 		p, ok := c.cfg.Pods.Get(name)
 		if !ok || !isManaged(p) {
+			// Gone already, or not a dispatcher pod: no delete event will clear it.
+			c.mu.Lock()
+			delete(c.done, name)
+			c.mu.Unlock()
 			return
 		}
 		c.deletePod(context.Background(), p, "completed")

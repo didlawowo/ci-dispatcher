@@ -22,10 +22,15 @@ type testPods struct {
 	PodAPI
 	pod     *corev1.Pod
 	patched chan string
+	deleted []string
 }
 
 func (p *testPods) Managed() []*corev1.Pod    { return []*corev1.Pod{p.pod} }
 func (p *testPods) RunnerPods() []*corev1.Pod { return p.Managed() }
+func (p *testPods) Delete(_ context.Context, name string, _ types.UID) error {
+	p.deleted = append(p.deleted, name)
+	return nil
+}
 func (p *testPods) Patch(_ context.Context, name string, _ types.UID, _ map[string]string, _ map[string]string) error {
 	p.patched <- name
 	return nil
@@ -204,5 +209,25 @@ func TestServedByAddsTheDispatcherImageWithoutMutatingTheClaim(t *testing.T) {
 	}
 	if got := (&Controller{}).servedBy(claim.Payload{}); got.Env != nil {
 		t.Fatalf("no agent image, env %v", got.Env)
+	}
+}
+
+// After a restart, a busy pod survives until every queue of its repository
+// has its scale set; another repository still unresolved does not block it.
+func TestGCKeepsBusyPodsUntilTheirRepositoryIsResolved(t *testing.T) {
+	labels := pods.Labels{Prefix: "example.com/ci"}
+	p := &testPods{pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "busy", Annotations: map[string]string{labels.ClaimedAnnotation(): "now"}, Labels: map[string]string{labels.Repo(): "r2", labels.ScaleSetID(): "7", labels.State(): pods.StateBusy}}}}
+	c := New(Config{Catalog: &catalog.Catalog{Profiles: map[string]*catalog.Profile{"light": {}}}, Queues: []catalog.Queue{{Name: "a", Repo: "r1", Profile: "light"}, {Name: "b", Repo: "r2", Profile: "light"}, {Name: "c", Repo: "r2", Profile: "light"}}, Pods: p, Mailbox: &testMailbox{}, Metrics: metrics.New(), Labels: labels})
+	for _, q := range []string{"", "b"} {
+		if q != "" {
+			c.OnScaleSet(q, 2)
+		}
+		if c.GC(context.Background(), false); len(p.deleted) != 0 {
+			t.Fatalf("pod of an unresolved repository deleted (resolved: %q): %v", q, p.deleted)
+		}
+	}
+	c.OnScaleSet("c", 3)
+	if c.GC(context.Background(), false); len(p.deleted) != 1 {
+		t.Fatalf("pod of an unknown scale set kept once its repository resolved: %v", p.deleted)
 	}
 }

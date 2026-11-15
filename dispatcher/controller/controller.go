@@ -44,6 +44,8 @@ const (
 	lostMailboxMinAge  = 30 * time.Second
 	warmNotReadyMaxAge = 10 * time.Minute
 	scaleDownMinAge    = 2 * time.Minute
+	// apiCallTimeout bounds one GitHub call made from Reconcile.
+	apiCallTimeout = 20 * time.Second
 	// pendingMaxAge bounds how long a created or assigned pod is counted
 	// before the pod cache shows it.
 	pendingMaxAge = 2 * time.Minute
@@ -874,7 +876,7 @@ func (c *Controller) scaleDown(ctx context.Context, qs *queueState, ps []*corev1
 		}
 		if id, err := strconv.ParseInt(p.Annotations[c.cfg.Labels.RunnerIDAnnotation()], 10, 64); err == nil {
 			if busy == nil {
-				listCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				listCtx, cancel := context.WithTimeout(ctx, apiCallTimeout)
 				runners, err := c.cfg.API.ListRunners(listCtx, qs.q.Repo)
 				cancel()
 				if err != nil {

@@ -12,6 +12,6 @@ permissions:
 
 jobs:
   policy:
-    uses: didlawowo/workflow-ci/.github/workflows/mutation-issue-policy.yml@v1.22.5
+    uses: didlawowo/workflow-ci/.github/workflows/mutation-issue-policy.yml@v1.22.7
     with:
       runner: arc-runner-ci-dispatcher

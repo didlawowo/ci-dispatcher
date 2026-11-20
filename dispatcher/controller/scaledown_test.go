@@ -61,8 +61,21 @@ func TestCompletedJobPodIsNotCountedAsActive(t *testing.T) {
 		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{cfg.Labels.ScaleSetID(): "4"}}}
 	}
 	c.OnJobCompleted("q", &scaleset.JobCompleted{RunnerName: "ci-docker-done"})
-	if got := len(c.queueRunners([]*corev1.Pod{pod("ci-docker-done"), pod("ci-docker-idle")})[4]); got != 1 {
+	if got := len(c.queueRunners([]*corev1.Pod{pod("ci-docker-done"), pod("ci-docker-idle")})[scaleSetKey{id: 4}]); got != 1 {
 		t.Fatalf("%d runner(s) actif(s), attendu 1 (le pod au job terminé ne compte plus)", got)
+	}
+}
+
+// GitHub numérote les scale sets par dépôt : deux dépôts ont le même numéro.
+// Mélangés, les runners d'un dépôt sont réduits par la file de l'autre.
+func TestQueueRunnersKeepsTwoRepositoriesWithTheSameScaleSetIDApart(t *testing.T) {
+	cfg, _ := newColdTestConfig(t, &scaleDownAPI{}, &scaleDownPods{}, &coldTestMailbox{}, "registry/dispatcher@sha256:abc")
+	pod := func(name, repo string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{cfg.Labels.ScaleSetID(): "9", cfg.Labels.Repo(): repo}}}
+	}
+	got := New(cfg).queueRunners([]*corev1.Pod{pod("ci-docker-a", "keryx"), pod("ci-docker-b", "keryx"), pod("ci-docker-c", "demo")})
+	if len(got[scaleSetKey{"keryx", 9}]) != 2 || len(got[scaleSetKey{"demo", 9}]) != 1 {
+		t.Fatalf("runners de deux dépôts mélangés sous le même numéro de scale set : %v", got)
 	}
 }
 

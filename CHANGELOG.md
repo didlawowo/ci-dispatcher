@@ -4,6 +4,13 @@ All notable changes to ci-dispatcher are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 and follows the [Conventional Commits](https://www.conventionalcommits.org) spec.
 
+## [0.2.2] - 2026-11-20
+
+### Bug Fixes
+
+- *(controller)* Un numéro de scale set ne mélange plus les runners de deux dépôts (#21)
+
+
 ## [0.2.1] - 2026-11-15
 
 ### Bug Fixes

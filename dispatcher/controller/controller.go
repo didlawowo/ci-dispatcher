@@ -112,6 +112,17 @@ type pendingPod struct {
 	at         time.Time
 }
 
+// scaleSetKey identifies a scale set. GitHub numbers scale sets per
+// repository: the same ID serves queues of several repositories, so an ID
+// alone would mix their pods (another queue's scale-down then deletes them,
+// checking busy runners in the wrong repository).
+type scaleSetKey struct {
+	repo string
+	id   int
+}
+
+func (qs *queueState) key() scaleSetKey { return scaleSetKey{repo: qs.q.Repo, id: qs.scaleSetID} }
+
 type queueState struct {
 	q          catalog.Queue
 	scaleSetID int
@@ -135,7 +146,7 @@ type Controller struct {
 
 	mu        sync.Mutex
 	queues    map[string]*queueState
-	byID      map[int]*queueState
+	byID      map[scaleSetKey]*queueState
 	assigned  map[string]time.Time // pod name → assignment time
 	sources   map[string]string    // pod name → warm | cold
 	warmInfl  map[string]int       // profile → warm pods being created
@@ -159,7 +170,7 @@ func New(cfg Config) *Controller {
 		notify:    make(chan struct{}, 1),
 		sem:       make(chan struct{}, maxParallelStarts),
 		queues:    map[string]*queueState{},
-		byID:      map[int]*queueState{},
+		byID:      map[scaleSetKey]*queueState{},
 		assigned:  map[string]time.Time{},
 		sources:   map[string]string{},
 		warmInfl:  map[string]int{},
@@ -197,10 +208,10 @@ func (c *Controller) OnScaleSet(queue string, id int) {
 		return
 	}
 	if qs.scaleSetID != 0 && qs.scaleSetID != id {
-		delete(c.byID, qs.scaleSetID)
+		delete(c.byID, qs.key())
 	}
 	qs.scaleSetID = id
-	c.byID[id] = qs
+	c.byID[qs.key()] = qs
 }
 
 // OnStatistics implements sessions.Handler: the wanted runner count is the
@@ -369,9 +380,10 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
-// queueRunners counts the live runner pods of every scale set.
-func (c *Controller) queueRunners(all []*corev1.Pod) map[int][]*corev1.Pod {
-	out := map[int][]*corev1.Pod{}
+// queueRunners counts the live runner pods of every scale set, per
+// repository (scale set IDs are only unique within a repository).
+func (c *Controller) queueRunners(all []*corev1.Pod) map[scaleSetKey][]*corev1.Pod {
+	out := map[scaleSetKey][]*corev1.Pod{}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, p := range all {
@@ -382,7 +394,8 @@ func (c *Controller) queueRunners(all []*corev1.Pod) map[int][]*corev1.Pod {
 		if err != nil {
 			continue
 		}
-		out[id] = append(out[id], p)
+		k := scaleSetKey{repo: p.Labels[c.cfg.Labels.Repo()], id: id}
+		out[k] = append(out[k], p)
 	}
 	return out
 }
@@ -419,10 +432,11 @@ func (c *Controller) Reconcile(ctx context.Context) {
 			continue
 		}
 		pend := pendQueue[qs.q.Name]
-		if now.Before(qs.retryAt) && qs.desired > len(byID[qs.scaleSetID])+qs.inflight+pend {
+		live := byID[qs.key()]
+		if now.Before(qs.retryAt) && qs.desired > len(live)+qs.inflight+pend {
 			continue
 		}
-		active := len(byID[qs.scaleSetID]) + qs.inflight + pend
+		active := len(live) + qs.inflight + pend
 		switch {
 		case qs.desired > active:
 			demands = append(demands, budget.Demand{
@@ -430,7 +444,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 				Nodes: preferred(qs.q.Spec), Missing: qs.desired - active,
 			})
 		case qs.desired < active && qs.inflight == 0 && pend == 0:
-			scaleDown = append(scaleDown, surplus{qs: qs, pods: byID[qs.scaleSetID], n: active - qs.desired})
+			scaleDown = append(scaleDown, surplus{qs: qs, pods: live, n: active - qs.desired})
 		}
 	}
 	c.mu.Unlock()
@@ -680,7 +694,7 @@ func (c *Controller) provisionFailed(qs *queueState, id int, err error) {
 	qs.retryAt = now.Add(wait)
 	gone := gh.IsNotFound(err) && id != 0 && qs.scaleSetID == id
 	if gone {
-		delete(c.byID, id)
+		delete(c.byID, qs.key())
 		qs.scaleSetID = 0
 	}
 	queue := qs.q.Name
@@ -954,9 +968,9 @@ func (c *Controller) claimed(p *corev1.Pod) bool {
 func (c *Controller) GC(ctx context.Context, startup bool) {
 	now := c.cfg.Now()
 	c.mu.Lock()
-	known := map[int]bool{}
-	for id := range c.byID {
-		known[id] = true
+	known := map[scaleSetKey]bool{}
+	for k := range c.byID {
+		known[k] = true
 	}
 	// The first GC runs before any queue has its scale set ID: a pod is only
 	// "unknown" once every queue of its repository has its ID, so a restart
@@ -980,7 +994,7 @@ func (c *Controller) GC(ctx context.Context, startup bool) {
 			continue
 		}
 		id, err := strconv.Atoi(p.Labels[c.cfg.Labels.ScaleSetID()])
-		if err == nil && !known[id] {
+		if err == nil && !known[scaleSetKey{repo: p.Labels[c.cfg.Labels.Repo()], id: id}] {
 			if ready, inCatalog := repoReady[p.Labels[c.cfg.Labels.Repo()]]; ready || (!inCatalog && state != pods.StateBusy) {
 				c.gcDelete(ctx, p, "unknown_queue")
 				continue

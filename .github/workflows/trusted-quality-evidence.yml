@@ -22,7 +22,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: didlawowo/workflow-ci/.github/actions/checkout-source@v1.22.7
+      - uses: didlawowo/workflow-ci/.github/actions/checkout-source@v1.24.1
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -77,7 +77,7 @@ jobs:
 
   evidence:
     needs: [workflow-ci-ref-policy]
-    uses: didlawowo/workflow-ci/.github/workflows/quality-evidence.yml@v1.22.7
+    uses: didlawowo/workflow-ci/.github/workflows/quality-evidence.yml@v1.24.1
     with:
       repo-type: go
       runner: arc-runner-ci-dispatcher

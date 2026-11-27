@@ -546,9 +546,13 @@ func TestRunnerRestreint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Spec.Template = "priv"
-	for _, restreint := range []bool{false, true} {
-		req.Spec.RestrictedRunner = restreint
+	cas := []struct {
+		gabarit   string
+		restreint bool
+	}{{"priv", false}, {"priv", true}, {catalog.TemplateLight, true}}
+	for _, k := range cas {
+		req.Spec.Template, req.Spec.RestrictedRunner = k.gabarit, k.restreint
+		restreint := k.restreint
 		pod, err := r.Render(req)
 		if err != nil {
 			t.Fatal(err)
@@ -558,7 +562,7 @@ func TestRunnerRestreint(t *testing.T) {
 			len(sc.Capabilities.Add) == 0 && len(sc.Capabilities.Drop) == 1 && sc.Capabilities.Drop[0] == "ALL" &&
 			sc.SeccompProfile != nil && sc.SeccompProfile.Type == corev1.SeccompProfileTypeRuntimeDefault
 		if bloqué != restreint {
-			t.Fatalf("restrictedRunner=%v : securityContext du runner %+v", restreint, sc)
+			t.Fatalf("gabarit %s, restrictedRunner=%v : securityContext du runner %+v", k.gabarit, restreint, sc)
 		}
 	}
 }

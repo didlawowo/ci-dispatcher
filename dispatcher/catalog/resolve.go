@@ -17,9 +17,10 @@ type Queue struct {
 	// Repo is the exact GitHub repository name.
 	Repo string
 	// RequestedProfile is the profile the repository asked for; it gives the
-	// queue name. Profile is the one used for pods: a public repository is
-	// always served by the public profile, whatever it asked for, so that
-	// existing workflow labels keep working.
+	// queue name. Profile is the one used for pods: a public repository keeps
+	// a requested profile only when that profile has trust: public; any other
+	// request is served by defaults.publicProfile, so that existing workflow
+	// labels keep working.
 	RequestedProfile string
 	Profile          string
 	Trust            string
@@ -67,8 +68,8 @@ type Visibility func(repo string) (public bool, err error)
 
 // Resolve returns every queue of the catalog, sorted by name. A public
 // repository is checked against the public profile rules; an error is
-// returned when a public repository is served and the public profile is
-// missing.
+// returned when a queue of a public repository would be served by a profile
+// that is missing or not public.
 func (c *Catalog) Resolve(visibility Visibility) ([]Queue, error) {
 	public := map[string]bool{}
 	for _, key := range slices.Sorted(maps.Keys(c.Repos)) {
@@ -84,10 +85,13 @@ func (c *Catalog) Resolve(visibility Visibility) ([]Queue, error) {
 		default:
 			public[name] = r.Visibility == "public"
 		}
-		if public[name] {
-			pp, ok := c.Profiles[c.Defaults.PublicProfile]
-			if !ok || pp.Trust != TrustPublic {
-				return nil, fmt.Errorf("repo %s is public but the public profile %q is not defined", name, c.Defaults.PublicProfile)
+		if !public[name] {
+			continue
+		}
+		for _, rp := range c.requestedProfiles(r) {
+			used := c.publicProfileFor(rp)
+			if pp, ok := c.Profiles[used]; !ok || pp == nil || pp.Trust != TrustPublic {
+				return nil, fmt.Errorf("repo %s is public but the public profile %q is not defined", name, used)
 			}
 		}
 	}
@@ -108,20 +112,37 @@ func (c *Catalog) resolveAll(public map[string]bool) []Queue {
 	for _, key := range slices.Sorted(maps.Keys(c.Repos)) {
 		r := c.Repos[key]
 		name := r.repoName(key)
-		requested := r.Profiles
-		if len(requested) == 0 {
-			requested = c.Defaults.Profiles
-		}
-		for _, rp := range requested {
+		for _, rp := range c.requestedProfiles(r) {
 			used := rp
 			if public[name] {
-				used = c.Defaults.PublicProfile
+				used = c.publicProfileFor(rp)
 			}
 			out = append(out, c.resolveQueue(name, r, rp, used))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// requestedProfiles gives the profiles a repository asks for, or the
+// default ones.
+func (c *Catalog) requestedProfiles(r *Repo) []string {
+	if len(r.Profiles) > 0 {
+		return r.Profiles
+	}
+	return c.Defaults.Profiles
+}
+
+// publicProfileFor gives the profile serving a public repository that asked
+// for requested: the requested profile itself when it is public (a public
+// repository chooses, for example, between a public profile with dind and
+// one without), defaults.publicProfile otherwise. A private profile is never
+// used for a public repository.
+func (c *Catalog) publicProfileFor(requested string) string {
+	if p, ok := c.Profiles[requested]; ok && p != nil && p.Trust == TrustPublic {
+		return requested
+	}
+	return c.Defaults.PublicProfile
 }
 
 // QueueName gives the scale set name of a repository and requested profile.

@@ -538,14 +538,25 @@ spec:
 func TestRunnerRestreint(t *testing.T) {
 	cat := loadCatalog(t)
 	req := requestForQueue(cat, findQueue(t, resolveQueues(t, cat), "runner-OpenTool"))
+	// Gabarit qui demande l'inverse : le runner privilégié avec SYS_ADMIN.
+	raw, _ := builtinFS.ReadFile("templates/light.yaml.tmpl")
+	priv := strings.Replace(string(raw), "      resources: {{ toJSON .Spec.Resources }}",
+		"      securityContext: {privileged: true, capabilities: {add: [SYS_ADMIN]}}\n      resources: {{ toJSON .Spec.Resources }}", 1)
+	r, err := NewRenderer(map[string]string{"priv": priv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Spec.Template = "priv"
 	for _, restreint := range []bool{false, true} {
 		req.Spec.RestrictedRunner = restreint
-		pod, err := newRenderer(t, cat).Render(req)
+		pod, err := r.Render(req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		sc := containerByName(pod, RunnerContainer).SecurityContext
-		bloqué := sc != nil && sc.AllowPrivilegeEscalation != nil && !*sc.AllowPrivilegeEscalation && sc.Capabilities != nil && len(sc.Capabilities.Drop) == 1 && sc.Capabilities.Drop[0] == "ALL"
+		bloqué := sc.Privileged != nil && !*sc.Privileged && sc.AllowPrivilegeEscalation != nil && !*sc.AllowPrivilegeEscalation &&
+			len(sc.Capabilities.Add) == 0 && len(sc.Capabilities.Drop) == 1 && sc.Capabilities.Drop[0] == "ALL" &&
+			sc.SeccompProfile != nil && sc.SeccompProfile.Type == corev1.SeccompProfileTypeRuntimeDefault
 		if bloqué != restreint {
 			t.Fatalf("restrictedRunner=%v : securityContext du runner %+v", restreint, sc)
 		}

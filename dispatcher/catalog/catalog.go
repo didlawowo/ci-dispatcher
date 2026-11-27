@@ -494,6 +494,9 @@ func (c *Catalog) validateProfile(name string, p *Profile) []error {
 	if p.DinD != nil && p.DinD.Image == "" {
 		add("dind.image is required")
 	}
+	if p.RestrictedRunner && p.DinD != nil {
+		add("restrictedRunner protects nothing beside a privileged dind sidecar: use it without dind")
+	}
 	for _, cn := range p.Caches {
 		cache, ok := c.Caches[cn]
 		if !ok {

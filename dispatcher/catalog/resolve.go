@@ -91,8 +91,12 @@ func (c *Catalog) Resolve(visibility Visibility) ([]Queue, error) {
 		}
 		for _, rp := range c.requestedProfiles(r) {
 			used := c.publicProfileFor(rp)
-			if pp, ok := c.Profiles[used]; !ok || pp == nil || pp.Trust != TrustPublic {
+			pp, ok := c.Profiles[used]
+			if !ok || pp == nil {
 				return nil, fmt.Errorf("repo %s is public but the public profile %q is not defined", name, used)
+			}
+			if pp.Trust != TrustPublic {
+				return nil, fmt.Errorf("repo %s is public but profile %q does not have trust: public", name, used)
 			}
 		}
 	}

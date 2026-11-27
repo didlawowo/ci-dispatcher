@@ -137,8 +137,11 @@ fileNames: {docker: "runner-{repo}", light: "runner-{repo}-light", "*": "runner-
 ```
 
 A profile with `restrictedRunner: true` runs the runner container without
-privilege escalation (no `sudo`) and without any Linux capability, whatever
-the template says.
+privilege escalation (no `sudo`), without any Linux capability and with the
+runtime default seccomp profile, whatever the template says. It is refused
+beside dind: the runner could still start a privileged container through the
+daemon socket. A warm pod serves a queue only when its trust label matches the
+profile's current trust.
 
 Per repository (and per repository and profile under `perProfile`):
 `image`, `resources`, `dockerDataLimit`, `dindMemory`, `maxRunners`,

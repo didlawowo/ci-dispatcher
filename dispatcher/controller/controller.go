@@ -476,7 +476,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 				continue
 			}
 			{
-				pod, ok := c.warm.Take(managed, q.Profile, q.Spec.Nodes, now)
+				pod, ok := c.warm.Take(managed, q.Profile, q.Trust, q.Spec.Nodes, now)
 				if !ok {
 					continue
 				}
@@ -652,7 +652,7 @@ func (c *Controller) provision(ctx context.Context, qs *queueState, node string)
 		if node != "" {
 			allowed = []string{node}
 		}
-		if p, ok := c.warm.Take(c.cfg.Pods.Managed(), q.Profile, allowed, c.cfg.Now()); ok {
+		if p, ok := c.warm.Take(c.cfg.Pods.Managed(), q.Profile, q.Trust, allowed, c.cfg.Now()); ok {
 			// The reservation is kept on success: the pod cache may still show
 			// the pod as warm until the label patch arrives, and another queue
 			// must not take it meanwhile. OnPod releases it on deletion.

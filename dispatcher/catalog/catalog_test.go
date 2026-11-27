@@ -151,6 +151,12 @@ func TestParseRefus(t *testing.T) {
 			},
 		},
 		{
+			nom: "restrictedRunner à côté de dind",
+			modifier: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "      image: registry.example.com/dind:v1.0.0\n", "      image: registry.example.com/dind:v1.0.0\n    restrictedRunner: true\n")
+			},
+		},
+		{
 			nom: "nom de dépôt invalide avec slash",
 			modifier: func(t *testing.T, src string) string {
 				return replaceOnce(t, src, "  demo:", "  bad/name:")
@@ -550,4 +556,16 @@ func TestResolveProfilPublicDemandé(t *testing.T) {
 			t.Errorf("Trust = %q, attendu %q", q.Trust, TrustPrivate)
 		}
 	})
+}
+
+func TestRestrictedRunnerPropagé(t *testing.T) {
+	c := mustParse(t, replaceOnce(t, validCatalog(), "    nodes: [node-a]\n    trust: public\n", "    nodes: [node-a]\n    trust: public\n    restrictedRunner: true\n"))
+	queues, err := c.Resolve(func(repo string) (bool, error) { return repo == "public-repo", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := queueByName(t, queues, "runner-public-repo")
+	if !q.Spec.RestrictedRunner || !c.ProfileSpec(q.Profile).RestrictedRunner {
+		t.Fatalf("restrictedRunner du profil %s absent de la file ou du pod chaud", q.Profile)
+	}
 }

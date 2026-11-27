@@ -261,6 +261,7 @@ func applyInvariants(pod *corev1.Pod, req Request) error {
 		c.SecurityContext.Privileged = ptr(false)
 		c.SecurityContext.AllowPrivilegeEscalation = ptr(false)
 		c.SecurityContext.Capabilities = &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
+		c.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
 	}
 
 	pod.Name = req.Name

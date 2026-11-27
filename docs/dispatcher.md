@@ -136,6 +136,10 @@ capacity:
 fileNames: {docker: "runner-{repo}", light: "runner-{repo}-light", "*": "runner-{repo}-{profile}"}
 ```
 
+A profile with `restrictedRunner: true` runs the runner container without
+privilege escalation (no `sudo`) and without any Linux capability, whatever
+the template says.
+
 Per repository (and per repository and profile under `perProfile`):
 `image`, `resources`, `dockerDataLimit`, `dindMemory`, `maxRunners`,
 `minRunners`, `nodes` (`["+node"]` adds, a plain list replaces),

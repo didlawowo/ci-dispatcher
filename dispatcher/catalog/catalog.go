@@ -180,6 +180,9 @@ type Profile struct {
 	Annotations        map[string]string `json:"annotations"`
 	Trust              string            `json:"trust"`
 	Warm               int               `json:"warm"`
+	// RestrictedRunner runs the runner container without privilege
+	// escalation (no sudo) and without any Linux capability.
+	RestrictedRunner bool `json:"restrictedRunner"`
 }
 
 // Defaults apply to every repository unless overridden.

@@ -54,6 +54,7 @@ type PodSpec struct {
 	Env                map[string]string
 	Annotations        map[string]string
 	Trust              string
+	RestrictedRunner   bool
 }
 
 // NamedCache is a cache with its catalog name.
@@ -194,6 +195,7 @@ func (c *Catalog) resolveQueue(repo string, r *Repo, requested, used string) Que
 		Env:                maps.Clone(p.Env),
 		Annotations:        maps.Clone(p.Annotations),
 		Trust:              p.Trust,
+		RestrictedRunner:   p.RestrictedRunner,
 	}
 	for _, cn := range p.Caches {
 		s.Caches = append(s.Caches, NamedCache{Name: cn, Cache: c.Caches[cn]})

@@ -534,3 +534,20 @@ spec:
 		t.Fatalf("un gabarit avec hostNetwork: true doit faire échouer Render")
 	}
 }
+
+func TestRunnerRestreint(t *testing.T) {
+	cat := loadCatalog(t)
+	req := requestForQueue(cat, findQueue(t, resolveQueues(t, cat), "runner-OpenTool"))
+	for _, restreint := range []bool{false, true} {
+		req.Spec.RestrictedRunner = restreint
+		pod, err := newRenderer(t, cat).Render(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sc := containerByName(pod, RunnerContainer).SecurityContext
+		bloqué := sc != nil && sc.AllowPrivilegeEscalation != nil && !*sc.AllowPrivilegeEscalation && sc.Capabilities != nil && len(sc.Capabilities.Drop) == 1 && sc.Capabilities.Drop[0] == "ALL"
+		if bloqué != restreint {
+			t.Fatalf("restrictedRunner=%v : securityContext du runner %+v", restreint, sc)
+		}
+	}
+}

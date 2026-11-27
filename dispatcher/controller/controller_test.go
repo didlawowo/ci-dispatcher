@@ -50,6 +50,7 @@ type testMailbox struct {
 }
 
 func (m *testMailbox) Ready(string) (time.Time, bool) { return m.ready, true }
+func (m *testMailbox) Delivered(string) bool          { return false }
 func (m *testMailbox) Deposit(name, _ string, p claim.Payload) error {
 	m.payload = p
 	m.delivered <- name
@@ -229,5 +230,16 @@ func TestGCKeepsBusyPodsUntilTheirRepositoryIsResolved(t *testing.T) {
 	c.OnScaleSet("c", 3)
 	if c.GC(context.Background(), false); len(p.deleted) != 1 {
 		t.Fatalf("pod of an unknown scale set kept once its repository resolved: %v", p.deleted)
+	}
+}
+
+func TestGCDeletesAWarmPodOfAnOutdatedTrust(t *testing.T) {
+	labels := pods.Labels{Prefix: "example.com/ci"}
+	for trust, deleted := range map[string]int{"private": 1, "public": 0} {
+		p := &testPods{pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "warm", Labels: map[string]string{labels.State(): pods.StateWarm, labels.Profile(): "light", labels.Trust(): trust}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}}
+		c := New(Config{Catalog: &catalog.Catalog{Profiles: map[string]*catalog.Profile{"light": {Trust: catalog.TrustPublic}}}, Pods: p, Mailbox: &testMailbox{ready: time.Now()}, Metrics: metrics.New(), Labels: labels})
+		if c.GC(context.Background(), false); len(p.deleted) != deleted {
+			t.Fatalf("warm pod of trust %s in a public profile: deleted %v", trust, p.deleted)
+		}
 	}
 }

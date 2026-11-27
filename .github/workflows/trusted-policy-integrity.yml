@@ -10,6 +10,6 @@ permissions:
 
 jobs:
   integrity:
-    uses: didlawowo/workflow-ci/.github/workflows/policy-integrity.yml@v1.25.0
+    uses: didlawowo/workflow-ci/.github/workflows/policy-integrity.yml@v1.26.0
     with:
       runner: arc-runner-ci-dispatcher

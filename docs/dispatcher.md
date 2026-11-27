@@ -136,6 +136,13 @@ capacity:
 fileNames: {docker: "runner-{repo}", light: "runner-{repo}-light", "*": "runner-{repo}-{profile}"}
 ```
 
+A profile with `restrictedRunner: true` runs the runner container without
+privilege escalation (no `sudo`), without any Linux capability and with the
+runtime default seccomp profile, whatever the template says. It is refused
+beside dind: the runner could still start a privileged container through the
+daemon socket. A warm pod serves a queue only when its trust label matches the
+profile's current trust.
+
 Per repository (and per repository and profile under `perProfile`):
 `image`, `resources`, `dockerDataLimit`, `dindMemory`, `maxRunners`,
 `minRunners`, `nodes` (`["+node"]` adds, a plain list replaces),
@@ -144,11 +151,16 @@ account's API token, private repositories only), `cacheProfile` (`nfs` or `local
 `profiles`, `fileNames`, `priority`, `name` (exact GitHub name when it differs
 from the key).
 
-**Public repositories** (visibility read from the GitHub API) are always
-served by the public profile, whatever they ask for, under the queue names
-they asked for: workflows keep their labels. Their node and cache overrides
-are ignored, their caches are pod-local, and a public profile can never mount
-the shared language cache, the registry credentials or a control-plane node.
+**Public repositories** (visibility read from the GitHub API) are served by
+public profiles only, under the queue names they asked for: workflows keep
+their labels. A requested profile with `trust: public` is used as is, so a
+public repository picks its public profile per queue (one with dind for a job
+that runs containers, one without for the others); any other request falls
+back to `defaults.publicProfile`, which is best kept without dind. Their node,
+image, env and cache overrides are ignored, their caches are pod-local, and a
+public profile can never mount the shared language cache, the registry
+credentials or a control-plane node. `visibility: public` in the catalog makes
+`validate` and `render` check a public repository offline.
 
 `ci-dispatcher validate --catalog <file>` lists the queues; `ci-dispatcher
 render --catalog <file> <queue>` prints the cold pod of a queue.

@@ -82,14 +82,18 @@ func (p *Pool) Count(all []*corev1.Pod, profile string, now time.Time) Counts {
 }
 
 // Take reserves the oldest ready warm pod of a profile running on one of the
-// allowed nodes (any node when allowed is empty). The caller must Release it
-// once assigned or on failure.
-func (p *Pool) Take(all []*corev1.Pod, profile string, allowed []string, now time.Time) (*corev1.Pod, bool) {
+// allowed nodes (any node when allowed is empty) and carrying the trust the
+// profile has now: a pod made before the profile changed trust never serves
+// it. The caller must Release it once assigned or on failure.
+func (p *Pool) Take(all []*corev1.Pod, profile, trust string, allowed []string, now time.Time) (*corev1.Pod, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var candidates []*corev1.Pod
 	for _, pod := range all {
 		if !p.isWarm(pod, profile) || p.reserved[pod.Name] || !p.isReady(pod, now) {
+			continue
+		}
+		if pod.Labels[p.labels.Trust()] != trust {
 			continue
 		}
 		if len(allowed) > 0 && !slices.Contains(allowed, pod.Spec.NodeName) {

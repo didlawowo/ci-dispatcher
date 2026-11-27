@@ -476,7 +476,7 @@ func (c *Controller) Reconcile(ctx context.Context) {
 				continue
 			}
 			{
-				pod, ok := c.warm.Take(managed, q.Profile, q.Spec.Nodes, now)
+				pod, ok := c.warm.Take(managed, q.Profile, q.Trust, q.Spec.Nodes, now)
 				if !ok {
 					continue
 				}
@@ -652,7 +652,7 @@ func (c *Controller) provision(ctx context.Context, qs *queueState, node string)
 		if node != "" {
 			allowed = []string{node}
 		}
-		if p, ok := c.warm.Take(c.cfg.Pods.Managed(), q.Profile, allowed, c.cfg.Now()); ok {
+		if p, ok := c.warm.Take(c.cfg.Pods.Managed(), q.Profile, q.Trust, allowed, c.cfg.Now()); ok {
 			// The reservation is kept on success: the pod cache may still show
 			// the pod as warm until the label patch arrives, and another queue
 			// must not take it meanwhile. OnPod releases it on deletion.
@@ -991,6 +991,12 @@ func (c *Controller) GC(ctx context.Context, startup bool) {
 		}
 		state := p.Labels[c.cfg.Labels.State()]
 		if state == pods.StateWarm {
+			// A warm pod made before its profile changed trust is never taken
+			// (warmpool.Take) yet would fill the reserve forever: remove it so
+			// the reserve is rebuilt with the current trust.
+			if prof, ok := c.cfg.Catalog.Profiles[p.Labels[c.cfg.Labels.Profile()]]; ok && prof != nil && p.Labels[c.cfg.Labels.Trust()] != prof.Trust {
+				c.gcDelete(ctx, p, "warm_outdated")
+			}
 			continue
 		}
 		id, err := strconv.Atoi(p.Labels[c.cfg.Labels.ScaleSetID()])

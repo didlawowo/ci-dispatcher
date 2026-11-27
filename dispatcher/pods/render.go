@@ -252,6 +252,17 @@ func applyInvariants(pod *corev1.Pod, req Request) error {
 	if pod.Spec.HostNetwork || pod.Spec.HostPID || pod.Spec.HostIPC {
 		return fmt.Errorf("template %s must not use host namespaces", req.Spec.Template)
 	}
+	if req.Spec.RestrictedRunner {
+		// Whatever the template says: no escalation, no capability.
+		c := &pod.Spec.Containers[runner]
+		if c.SecurityContext == nil {
+			c.SecurityContext = &corev1.SecurityContext{}
+		}
+		c.SecurityContext.Privileged = ptr(false)
+		c.SecurityContext.AllowPrivilegeEscalation = ptr(false)
+		c.SecurityContext.Capabilities = &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
+		c.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
+	}
 
 	pod.Name = req.Name
 	pod.Namespace = req.Namespace

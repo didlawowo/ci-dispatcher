@@ -180,6 +180,9 @@ type Profile struct {
 	Annotations        map[string]string `json:"annotations"`
 	Trust              string            `json:"trust"`
 	Warm               int               `json:"warm"`
+	// RestrictedRunner runs the runner container without privilege
+	// escalation (no sudo) and without any Linux capability.
+	RestrictedRunner bool `json:"restrictedRunner"`
 }
 
 // Defaults apply to every repository unless overridden.
@@ -490,6 +493,9 @@ func (c *Catalog) validateProfile(name string, p *Profile) []error {
 	}
 	if p.DinD != nil && p.DinD.Image == "" {
 		add("dind.image is required")
+	}
+	if p.RestrictedRunner && p.DinD != nil {
+		add("restrictedRunner protects nothing beside a privileged dind sidecar: use it without dind")
 	}
 	for _, cn := range p.Caches {
 		cache, ok := c.Caches[cn]

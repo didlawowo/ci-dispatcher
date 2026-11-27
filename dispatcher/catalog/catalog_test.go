@@ -151,6 +151,12 @@ func TestParseRefus(t *testing.T) {
 			},
 		},
 		{
+			nom: "restrictedRunner à côté de dind",
+			modifier: func(t *testing.T, src string) string {
+				return replaceOnce(t, src, "      image: registry.example.com/dind:v1.0.0\n", "      image: registry.example.com/dind:v1.0.0\n    restrictedRunner: true\n")
+			},
+		},
+		{
 			nom: "nom de dépôt invalide avec slash",
 			modifier: func(t *testing.T, src string) string {
 				return replaceOnce(t, src, "  demo:", "  bad/name:")
@@ -414,4 +420,152 @@ func TestWarmCompatible(t *testing.T) {
 			t.Errorf("WarmCompatible = true, attendu false")
 		}
 	})
+}
+
+func TestResolveProfilPublicDemandé(t *testing.T) {
+	avecProfilPublicDind := func(t *testing.T, src string) string {
+		t.Helper()
+		return replaceOnce(t, src, "profiles:\n", fmt.Sprintf(`profiles:
+  public-dind:
+    template: docker
+    image: %s
+    dind:
+      image: registry.example.com/dind:v1.0.0
+    nodes: [node-a]
+    trust: public
+`, publicImage))
+	}
+
+	publicRepoDemande := func(t *testing.T, src, profiles string) string {
+		t.Helper()
+		return replaceOnce(t, src, "  public-repo:\n    profiles: [docker]", "  public-repo:\n    profiles: "+profiles)
+	}
+
+	publicProfileAbsent := func(t *testing.T, src string) string {
+		t.Helper()
+		return replaceOnce(t, src, "defaults:\n  profiles: [docker]\n  maxRunners: 6", "defaults:\n  profiles: [docker]\n  maxRunners: 6\n  publicProfile: absent")
+	}
+
+	privateRepoDemandeLight := func(t *testing.T, src string) string {
+		t.Helper()
+		return replaceOnce(t, src, "  demo:\n    profiles: [docker, light]", "  demo:\n    profiles: [light]")
+	}
+
+	queuePour := func(t *testing.T, c *Catalog, queues []Queue, repo, profile string) Queue {
+		t.Helper()
+		r := c.Repos[repo]
+		if r == nil {
+			t.Fatalf("dépôt %q introuvable dans le catalogue", repo)
+		}
+		return queueByName(t, queues, c.QueueName(repo, r, profile))
+	}
+
+	visibilityPublique := func(repo string) (bool, error) {
+		return repo == "public-repo", nil
+	}
+
+	t.Run("profil public demandé conservé", func(t *testing.T) {
+		src := publicRepoDemande(t, avecProfilPublicDind(t, validCatalog()), "[public-dind]")
+		c := mustParse(t, src)
+		queues, err := c.Resolve(visibilityPublique)
+		if err != nil {
+			t.Fatalf("Resolve a échoué : %v", err)
+		}
+		q := queuePour(t, c, queues, "public-repo", "public-dind")
+		if q.Profile != "public-dind" {
+			t.Errorf("Profile = %q, attendu public-dind", q.Profile)
+		}
+		if q.Trust != TrustPublic {
+			t.Errorf("Trust = %q, attendu %q", q.Trust, TrustPublic)
+		}
+		if q.Spec.DinD == nil {
+			t.Errorf("Spec.DinD = nil, attendu un DinD pour le profil public-dind")
+		}
+	})
+
+	t.Run("profil privé demandé servi par le profil public par défaut", func(t *testing.T) {
+		src := publicRepoDemande(t, avecProfilPublicDind(t, validCatalog()), "[public-dind, light]")
+		c := mustParse(t, src)
+		queues, err := c.Resolve(visibilityPublique)
+		if err != nil {
+			t.Fatalf("Resolve a échoué : %v", err)
+		}
+
+		qPublicDind := queuePour(t, c, queues, "public-repo", "public-dind")
+		if qPublicDind.Profile != "public-dind" {
+			t.Errorf("Profile = %q, attendu public-dind", qPublicDind.Profile)
+		}
+		if qPublicDind.Trust != TrustPublic {
+			t.Errorf("Trust = %q, attendu %q", qPublicDind.Trust, TrustPublic)
+		}
+		if qPublicDind.Spec.DinD == nil {
+			t.Errorf("Spec.DinD = nil, attendu un DinD pour le profil public-dind")
+		}
+
+		qLight := queuePour(t, c, queues, "public-repo", "light")
+		if qLight.Profile != "public" {
+			t.Errorf("Profile = %q, attendu public", qLight.Profile)
+		}
+		if qLight.Trust != TrustPublic {
+			t.Errorf("Trust = %q, attendu %q", qLight.Trust, TrustPublic)
+		}
+		if qLight.Spec.DinD != nil {
+			t.Errorf("Spec.DinD = %v, attendu nil pour le profil public", qLight.Spec.DinD)
+		}
+	})
+
+	t.Run("publicProfile absent toléré si tous les profils demandés sont publics", func(t *testing.T) {
+		src := publicProfileAbsent(t, publicRepoDemande(t, avecProfilPublicDind(t, validCatalog()), "[public-dind]"))
+		c := mustParse(t, src)
+		queues, err := c.Resolve(visibilityPublique)
+		if err != nil {
+			t.Fatalf("Resolve a échoué : %v", err)
+		}
+		q := queuePour(t, c, queues, "public-repo", "public-dind")
+		if q.Profile != "public-dind" {
+			t.Errorf("Profile = %q, attendu public-dind", q.Profile)
+		}
+		if q.Trust != TrustPublic {
+			t.Errorf("Trust = %q, attendu %q", q.Trust, TrustPublic)
+		}
+	})
+
+	t.Run("publicProfile absent refusé si un profil demandé est privé", func(t *testing.T) {
+		src := publicProfileAbsent(t, publicRepoDemande(t, avecProfilPublicDind(t, validCatalog()), "[public-dind, docker]"))
+		c := mustParse(t, src)
+		if _, err := c.Resolve(visibilityPublique); err == nil {
+			t.Fatalf("Resolve aurait dû refuser un dépôt public servi par un profil absent")
+		}
+	})
+
+	t.Run("dépôt privé conserve son profil demandé", func(t *testing.T) {
+		src := privateRepoDemandeLight(t, avecProfilPublicDind(t, validCatalog()))
+		c := mustParse(t, src)
+		visibility := func(repo string) (bool, error) {
+			return false, nil
+		}
+		queues, err := c.Resolve(visibility)
+		if err != nil {
+			t.Fatalf("Resolve a échoué : %v", err)
+		}
+		q := queuePour(t, c, queues, "demo", "light")
+		if q.Profile != "light" {
+			t.Errorf("Profile = %q, attendu light", q.Profile)
+		}
+		if q.Trust != TrustPrivate {
+			t.Errorf("Trust = %q, attendu %q", q.Trust, TrustPrivate)
+		}
+	})
+}
+
+func TestRestrictedRunnerPropagé(t *testing.T) {
+	c := mustParse(t, replaceOnce(t, validCatalog(), "    nodes: [node-a]\n    trust: public\n", "    nodes: [node-a]\n    trust: public\n    restrictedRunner: true\n"))
+	queues, err := c.Resolve(func(repo string) (bool, error) { return repo == "public-repo", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := queueByName(t, queues, "runner-public-repo")
+	if !q.Spec.RestrictedRunner || !c.ProfileSpec(q.Profile).RestrictedRunner {
+		t.Fatalf("restrictedRunner du profil %s absent de la file ou du pod chaud", q.Profile)
+	}
 }
